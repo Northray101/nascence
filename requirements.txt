@@ -5,9 +5,11 @@ pygame-ce==2.5.2
 pygame_gui==0.6.13
 # 2D physics; soft jelly bodies & legs are composed from springs/motors
 pymunk==6.9.0
-# Reinforcement learning: PPO out of the box
+# Reinforcement learning: PPO out of the box.
+# (Plain stable-baselines3, NOT [extra]: the extras pull in Atari/tensorboard/
+#  opencv deps we don't use, and some don't support Python 3.12.)
 gymnasium==0.29.1
-stable-baselines3[extra]==2.3.2
+stable-baselines3==2.3.2
 # Neural-net backend used by stable-baselines3 (CPU is fine)
 torch==2.3.1
 # Math + reward charts (matplotlib is rendered with the Agg backend, never shown)
