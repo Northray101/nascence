@@ -78,7 +78,19 @@ class Trainer:
                 from .creature_env import CreatureEnv
 
                 env = CreatureEnv(morph=species.morphology)
-            model = PPO("MlpPolicy", env, device="cpu", verbose=0)
+            # Tuned for *live* training where data trickles in: short rollouts so
+            # the first policy update lands in seconds (not after 2048 steps), and
+            # a little entropy so the brain keeps wiggling its legs to explore
+            # instead of collapsing to "stand still".
+            model = PPO(
+                "MlpPolicy",
+                env,
+                device="cpu",
+                verbose=0,
+                n_steps=512,
+                batch_size=128,
+                ent_coef=0.01,
+            )
 
             trainer = self
 

@@ -1,8 +1,9 @@
 # nascence
 
-A neural 2D bacterial simulator. Train the *brains* of soft-bodied bacteria with
-reinforcement learning, give your species a name, then spawn trained individuals
-into a living top-down sandbox and watch them hunt for food by smell.
+A neural 2D bacterial simulator. **Evolve** the *brains* of soft-bodied bacteria
+— a whole population competes live, the best survive and breed, the rest are
+culled — then give your species a name and spawn trained individuals into a
+living top-down sandbox to watch them hunt for food by smell.
 
 This is an early rough-draft build with all the major pieces sketched in.
 
@@ -11,12 +12,15 @@ This is an early rough-draft build with all the major pieces sketched in.
 1. **Create a species** and name it, choosing its **role** (forager that eats
    food, or predator that hunts prey), **body** (firm or squishy *jelly*),
    number of **legs**, and **leg joints** (simple, or hip + knee).
-2. **Train its brain in a live sandbox** — watch it learn in real time and
-   *interfere*: drop/clear food, drag the creature around, draw walls, and
-   give it a **Treat (+)** or **Scold (–)** to shape behavior right now. A
-   **speed slider** and **pause** let you watch closely or fast-forward.
-   Training uses PPO (a standard reinforcement-learning algorithm) under the hood.
-3. **Save** the trained brain automatically when you press *Save & stop*.
+2. **Train its brain in a live sandbox** — a whole **population** of variations
+   lives in the world at once. They all try; each generation the **best
+   survive** and the rest are **culled and replaced by mutated copies of the
+   winners**, so the species visibly gets better. Meanwhile you can *interfere*:
+   drop/clear food, drag the current leader around, draw walls, and give it a
+   **Treat (+)** or **Scold (–)** to nudge it right now. A **speed slider** and
+   **pause** let you watch closely or fast-forward. (This is *neuroevolution* —
+   fast to start and easy to watch, with no slow warm-up.)
+3. **Save** the best brain automatically when you press *Save best & stop*.
 4. **Spawn** trained creatures into the Sandbox, drop food, and watch foragers
    eat and predators hunt.
 
@@ -60,9 +64,11 @@ the first launch.)
 A window opens. From the main menu:
 
 - **Species** → *New species* → name it → *Create*. Select it, then *Train selected*.
-- On the training screen pick **Quick / Normal / Thorough** and press **Start**.
-  (The very first start takes a few seconds while it loads PyTorch.) Watch the
-  reward line rise, then it saves automatically.
+- The training screen immediately spawns a **population** that starts wriggling
+  and competing. Watch the **best-score line** climb generation by generation;
+  drop food, drag the leader, or use **Treat / Scold** to steer it. Use the
+  **speed slider** to fast-forward. When you like how it moves, press **Save
+  best & stop** — the winning brain is saved.
 - Go **Back**, then from the main menu open the **Sandbox**. Pick your species,
   press **Spawn mode**, and click in the world to place one. Switch to **Food
   mode** and click to drop food. Watch it forage.

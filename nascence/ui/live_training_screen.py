@@ -1,16 +1,17 @@
-"""Live, interactive training: watch a creature learn and meddle in real time.
+"""Live, interactive training: watch a whole population evolve in real time.
 
-This is the unified sandbox the project is built around. The creature trains
-(PPO) inside a shared, persistent world rendered here every frame. While it
-learns you can:
+This is the unified sandbox the project is built around. A *population* of
+creatures lives and learns by neuroevolution inside a shared, persistent world
+rendered here every frame: the best survive each generation and the rest are
+culled and replaced by mutated copies of the winners. While it runs you can:
 
 * drop / clear food (Food tool)
-* drag the creature around (Drag tool)
+* drag the current leader around (Drag tool)
 * draw walls (Wall tool: click start, click end)
-* reward it now (Treat) or punish it now (Scold)
+* reward the leader now (Treat) or punish it now (Scold)
 * set the speed (slow to fast-forward) and pause
 
-The brain is saved automatically when you press "Save & stop".
+The best brain is saved automatically when you press "Save & stop".
 """
 
 from __future__ import annotations
@@ -22,9 +23,8 @@ from pygame_gui.elements import UIButton, UIHorizontalSlider, UILabel
 from .. import config
 from ..render.camera import Camera
 from ..render.sim_renderer import draw_world
+from ..rl.evolution import EvolutionTrainer
 from ..rl.live_control import Command, SharedControl
-from ..rl.live_env import LiveCreatureEnv
-from ..rl.trainer import Trainer
 from ..sim.world import World
 from .screen import Screen
 
@@ -39,14 +39,14 @@ class LiveTrainingScreen(Screen):
         super().__init__(app)
         self.species = species
 
-        # Shared world + control channel + the live env (all on this thread).
+        # Shared world + control channel + the evolution engine (population).
         self.world = World()
         self.ctrl = SharedControl()
-        self.ctrl.set_speed(30.0)
-        self.live_env = LiveCreatureEnv(self.world, self.ctrl,
-                                        morph=species.morphology,
-                                        role=getattr(species, "role", "forager"))
-        self.trainer = Trainer()
+        self.ctrl.set_speed(60.0)
+        self.trainer = EvolutionTrainer(
+            self.world, self.ctrl,
+            morph=species.morphology,
+            role=getattr(species, "role", "forager"))
 
         self.camera = Camera(_VIEW_W, config.WINDOW_HEIGHT)
         self.camera.fit(self.world.width, self.world.height)
@@ -58,7 +58,7 @@ class LiveTrainingScreen(Screen):
         self._dragging = False
         self.reward_history: list[float] = []
         self.timesteps = 0
-        self.status = "Warming up the brain… (loading PyTorch)"
+        self.status = "Spawning the first generation…"
 
         self._build_panel()
 
@@ -88,23 +88,23 @@ class LiveTrainingScreen(Screen):
                                   "Scold  (–)", self.manager)
 
         self.speed_label = UILabel(pygame.Rect((px, 248), (w, 24)),
-                                   "Speed: 30 steps/s", self.manager)
+                                   "Speed: 60 steps/s", self.manager)
         self.speed_slider = UIHorizontalSlider(
-            pygame.Rect((px, 274), (w, 28)), start_value=30,
-            value_range=(2, 400), manager=self.manager)
+            pygame.Rect((px, 274), (w, 28)), start_value=60,
+            value_range=(2, 600), manager=self.manager)
         self.btn_pause = UIButton(pygame.Rect((px, 308), (w, 38)),
                                   "Pause", self.manager)
 
         self.btn_save = UIButton(pygame.Rect((px, 360), (w, 44)),
-                                 "Save & stop", self.manager)
+                                 "Save best & stop", self.manager)
         self.btn_back = UIButton(
             pygame.Rect((px, config.WINDOW_HEIGHT - 56), (w, 40)),
-            "Back (save)", self.manager)
+            "Back (save best)", self.manager)
 
         self.chart_rect = pygame.Rect(px, 420, w, 200)
 
     def on_enter(self) -> None:
-        self.trainer.start(self.species, _LIVE_TIMESTEPS, env=self.live_env)
+        self.trainer.start(self.species, _LIVE_TIMESTEPS)
 
     # -- events -------------------------------------------------------------
     def on_event(self, event: pygame.event.Event) -> None:
@@ -134,7 +134,7 @@ class LiveTrainingScreen(Screen):
         if el == self.btn_food:
             self.tool = "food"; self.status = "Food tool: click to drop food."
         elif el == self.btn_drag:
-            self.tool = "drag"; self.status = "Drag tool: click/drag the creature."
+            self.tool = "drag"; self.status = "Drag tool: click/drag the leader."
         elif el == self.btn_wall:
             self.tool = "wall"; self._wall_start = None
             self.status = "Wall tool: click start point, then end point."
@@ -149,7 +149,7 @@ class LiveTrainingScreen(Screen):
             self.ctrl.set_paused(self.paused)
             self.btn_pause.set_text("Resume" if self.paused else "Pause")
         elif el in (self.btn_save, self.btn_back):
-            self.status = "Saving brain…"
+            self.status = "Saving the best brain…"
             self.trainer.request_stop()
             self.ctrl.set_paused(False)  # let the loop reach the stop check
 
@@ -177,8 +177,9 @@ class LiveTrainingScreen(Screen):
                 self.reward_history.append(p.mean_reward)
             if not p.done and self.trainer.running:
                 self.status = (
-                    f"Learning…  {p.timesteps:,} steps   "
-                    f"avg reward: {p.mean_reward:.1f}"
+                    f"Gen {self.trainer.generation}   "
+                    f"population: {len(self.trainer.population)}   "
+                    f"best score: {p.mean_reward:.1f}"
                 )
             if p.done:
                 if p.error:
@@ -209,7 +210,7 @@ class LiveTrainingScreen(Screen):
         r = self.chart_rect
         pygame.draw.rect(surface, (24, 30, 46), r, border_radius=8)
         pygame.draw.rect(surface, (70, 82, 110), r, width=2, border_radius=8)
-        surface.blit(font.render("Avg reward (it's learning if this rises)",
+        surface.blit(font.render("Best score per generation (rising = evolving)",
                                  True, (170, 185, 210)), (r.x + 8, r.y + 6))
         data = self.reward_history
         if len(data) < 2:

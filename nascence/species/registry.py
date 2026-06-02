@@ -14,6 +14,7 @@ from .species import Species
 
 _METADATA = "metadata.json"
 _POLICY = "policy.zip"
+_POLICY_NPZ = "policy.npz"
 
 
 def _safe_name(name: str) -> str:
@@ -34,12 +35,16 @@ def policy_path(name: str) -> Path:
     return species_path(name) / _POLICY
 
 
+def policy_npz_path(name: str) -> Path:
+    return species_path(name) / _POLICY_NPZ
+
+
 def exists(name: str) -> bool:
     return metadata_path(name).is_file()
 
 
 def has_trained_policy(name: str) -> bool:
-    return policy_path(name).is_file()
+    return policy_npz_path(name).is_file() or policy_path(name).is_file()
 
 
 def list_species() -> list[Species]:
