@@ -67,6 +67,23 @@ class MLPPolicy:
             (jit(self.w1), jit(self.b1), jit(self.w2), jit(self.b2)),
         )
 
+    @staticmethod
+    def crossover(a: "MLPPolicy", b: "MLPPolicy",
+                  rng: np.random.Generator) -> "MLPPolicy":
+        """Uniform crossover: each weight randomly picked from ``a`` or ``b``.
+
+        Combines what made two winners successful, instead of refining a single
+        parent — escapes local optima much faster than pure mutation."""
+        def cross(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+            mask = rng.random(x.shape) < 0.5
+            return np.where(mask, x, y).astype(np.float32)
+
+        return MLPPolicy(
+            a.obs_dim, a.act_dim, a.hidden,
+            (cross(a.w1, b.w1), cross(a.b1, b.b1),
+             cross(a.w2, b.w2), cross(a.b2, b.b2)),
+        )
+
     # -- persistence --------------------------------------------------------
     def save_npz(self, path: Path | str) -> None:
         np.savez(

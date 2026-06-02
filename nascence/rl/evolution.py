@@ -1,21 +1,33 @@
-"""Neuroevolution in the live, shared world.
+"""Live neuroevolution: a competing population trained in the shared world.
 
-Instead of one brain slowly refined by PPO, this runs a *population* of brains
-at once, all visible in the same sandbox:
+A whole *population* of tiny numpy MLP brains lives in the world at once.
+Every generation the best survive and the rest are culled and replaced by
+**tournament-selected, uniform-crossover, mutated** offspring. The trainer:
 
-* every individual is a creature in the shared world driven by its own
-  :class:`MLPPolicy`;
-* each step, every creature senses, acts, and the world advances once;
-* fitness accrues from progress toward (and reaching) its goal — food for
-  foragers, prey for predators — plus any manual Treat/Scold from the user;
-* every *generation* (a fixed number of steps) the population is ranked: the
-  best survive, the rest are **killed off** and replaced by mutated copies of
-  the winners. Over generations the species gets visibly better.
+* runs **batched ticks** under one lock per ~60Hz GUI release, so the sim can
+  go far past the rendering rate (10,000+ steps/sec is normal);
+* exposes everything the user might want to nudge as *live attributes* — the
+  GUI panel can change population size, mutation strength, survivors, the
+  number of steps per generation, the **training phase**, etc. while the loop
+  is running;
+* boosts mutation automatically when the best score plateaus, then anneals
+  back when progress resumes (adaptive mutation, breaks local optima);
+* keeps a *hall-of-fame* clone of the all-time best brain and re-injects it
+  whenever progress stalls.
 
-It mirrors :class:`Trainer`'s interface (``start`` / ``request_stop`` /
-``drain`` / ``running`` emitting :class:`Progress`) so the training screen
-drives it the same way, and it obeys the same :class:`SharedControl` for
-speed / pause / user commands / manual reward.
+Training **phases** shape what the environment looks like and what counts as
+good behaviour:
+
+* ``move``   — single bright waypoint, no obstacles. Pure locomotion.
+* ``forage`` — several food sources, mild obstacles. Smell-driven hunting.
+* ``maze``   — food behind heavy obstacle walls. Pathfinding.
+* ``hunt``   — predators chase fleeing prey (falls back to forage for non-
+  predators).
+
+It still mirrors :class:`Trainer`'s interface (``start`` / ``request_stop`` /
+``drain`` / ``running`` emitting :class:`Progress`) so the training screen can
+drive it the same way, and obeys :class:`SharedControl` for speed / pause /
+user commands / manual reward.
 """
 
 from __future__ import annotations
@@ -38,24 +50,43 @@ from .live_control import Command, SharedControl
 from .neuro import MLPPolicy
 from .trainer import Progress
 
-# -- tunables ---------------------------------------------------------------
-POP_SIZE = 12          # creatures alive at once
-SURVIVORS = 3          # how many of the best carry over each generation
-GEN_STEPS = 400        # world steps per generation before culling
-MUTATION = 0.18        # std of weight noise when breeding a child
-FOOD_TARGET = 4        # foragers: how many food in the level
-PREY_COUNT = 3         # predators: this many scripted prey to hunt
-PREY_FLEE_SPEED = 2.6
-TREAT_GAIN = 4.0       # how strongly a Treat/Scold nudges the leader's fitness
+# ---------------------------------------------------------------------------
+# Defaults (every one of these is also live-tunable through the GUI)
+# ---------------------------------------------------------------------------
+POP_SIZE = 16            # creatures alive at once
+SURVIVORS = 4            # how many of the best carry over each generation
+GEN_STEPS = 300          # world steps per generation before culling
+MUTATION = 0.15          # std of weight noise when breeding a child
+TOURNAMENT_K = 3         # how many to sample for tournament selection
+TREAT_GAIN = 4.0         # how strongly Treat/Scold nudges the leader
 
-# Difficulty ramp. Everyone starts at the same place each generation; the
-# *environment* is what changes — random, and harder at higher levels.
-BASE_TARGET_DIST = 150.0    # how far the goal sits at level 1
-DIST_PER_LEVEL = 70.0       # extra distance per level
-OBSTACLES_PER_LEVEL = 1     # extra random walls per level
-MAX_OBSTACLES = 8
-ADVANCE_FITNESS = 12.0      # a generation this good "solves" the level
-AUTO_WINS = 2               # solve it this many gens in a row -> auto level up
+# Difficulty ramp inside one phase.
+BASE_TARGET_DIST = 150.0
+DIST_PER_LEVEL = 70.0
+OBSTACLES_PER_LEVEL = 1
+MAX_OBSTACLES = 10
+ADVANCE_FITNESS = 12.0
+AUTO_WINS = 2
+
+# Phase-specific environment + scoring tweaks.
+PHASES = ("move", "forage", "maze", "hunt")
+PHASE_CONFIG = {
+    "move":   dict(food_count=1, food_smell=2.4, obstacle_mult=0.0,
+                   description="Reach a single waypoint."),
+    "forage": dict(food_count=4, food_smell=1.2, obstacle_mult=1.0,
+                   description="Find and eat food sources."),
+    "maze":   dict(food_count=3, food_smell=0.7, obstacle_mult=2.5,
+                   description="Get to food past obstacles."),
+    "hunt":   dict(food_count=0, food_smell=0.0, obstacle_mult=0.3,
+                   description="Predators catch fleeing prey."),
+}
+# Auto-curriculum order (used when phase auto-advances).
+PHASE_ORDER_FORAGER = ("move", "forage", "maze")
+PHASE_ORDER_PREDATOR = ("move", "hunt", "maze")
+
+# Predator-only.
+PREY_COUNT = 3
+PREY_FLEE_SPEED = 2.6
 
 
 @dataclass
@@ -67,6 +98,8 @@ class _Individual:
 
 
 class EvolutionTrainer:
+    """A population trained against a phase-driven curriculum in the live world."""
+
     def __init__(self, world: World, ctrl: SharedControl,
                  morph: CreatureMorphology, role: str = "forager") -> None:
         self.world = world
@@ -77,12 +110,14 @@ class EvolutionTrainer:
         self.act_dim = morph.num_actuators
         self._rng = np.random.default_rng()
 
+        # Threading.
         self._thread: threading.Thread | None = None
         self._queue: "list[Progress]" = []
         self._qlock = threading.Lock()
         self._stop = threading.Event()
         self._running = False
 
+        # Population state.
         self.population: list[_Individual] = []
         self.prey: list[object] = []
         self.generation = 0
@@ -90,20 +125,40 @@ class EvolutionTrainer:
         self.best_fitness = float("-inf")
         self.best_policy: MLPPolicy | None = None
 
-        # Everyone is born here, facing the same way, every generation.
+        # Same start, every generation.
         self.start_pos = self._centre()
         self.start_angle = 0.0
-        # Difficulty.
+
+        # Live-tunables (the GUI writes these via commands).
+        self.pop_size = POP_SIZE
+        self.survivors = SURVIVORS
+        self.gen_steps = GEN_STEPS
+        self.user_mutation = MUTATION
+        self.adaptive_mutation = True
+
+        # Curriculum.
+        self.phase = "move" if role != "predator" else "move"
         self.level = 1
         self.auto_advance = True
+
+        # Internal bookkeeping.
         self._win_streak = 0
         self._gen_best = 0.0
+        self._stagnation = 0
 
+    # ----- control API ----------------------------------------------------
     @property
     def running(self) -> bool:
         return self._running
 
-    # -- control ------------------------------------------------------------
+    @property
+    def effective_mutation(self) -> float:
+        """User-set rate plus an adaptive bonus that grows while we're stuck."""
+        if not self.adaptive_mutation or self._stagnation < 3:
+            return self.user_mutation
+        bonus = min(0.45, 0.05 * (self._stagnation - 2))
+        return float(min(0.9, self.user_mutation + bonus))
+
     def start(self, species: Species, total_timesteps: int = 0, env=None) -> None:
         if self._running:
             return
@@ -126,35 +181,15 @@ class EvolutionTrainer:
         with self._qlock:
             self._queue.append(Progress(**kw))
 
-    # -- world helpers ------------------------------------------------------
+    # ----- world helpers --------------------------------------------------
     def _centre(self) -> tuple[float, float]:
         return self.world.width * 0.5, self.world.height * 0.5
 
-    def _random_point(self, radius: float) -> tuple[float, float]:
-        cx, cy = self._centre()
-        ang = self._rng.uniform(0, 2 * math.pi)
-        r = radius * math.sqrt(self._rng.uniform(0.05, 1.0))
-        x = float(np.clip(cx + math.cos(ang) * r, 40, self.world.width - 40))
-        y = float(np.clip(cy + math.sin(ang) * r, 40, self.world.height - 40))
-        return x, y
-
-    def _spawn_individual(self, policy: MLPPolicy) -> _Individual:
-        # Always born at the shared start, facing the same way. Brains differ;
-        # the starting conditions do not.
-        creature = self.world.add_creature(
-            self.morph, self.start_pos, self.start_angle, role=self.role)
-        ind = _Individual(creature=creature, policy=policy)
-        ind.prev_dist = self._target_dist(creature)
-        return ind
-
-    # -- difficulty ---------------------------------------------------------
     def _target_distance(self) -> float:
-        """How far goals sit from the start at the current level."""
         d = BASE_TARGET_DIST + (self.level - 1) * DIST_PER_LEVEL
         return min(d, 0.42 * min(self.world.width, self.world.height))
 
     def _goal_point(self) -> tuple[float, float]:
-        """A random point at roughly the level's target distance from start."""
         cx, cy = self.start_pos
         ang = self._rng.uniform(0, 2 * math.pi)
         d = self._target_distance() * self._rng.uniform(0.8, 1.15)
@@ -162,13 +197,19 @@ class EvolutionTrainer:
         y = float(np.clip(cy + math.sin(ang) * d, 50, self.world.height - 50))
         return x, y
 
+    def _phase_cfg(self) -> dict:
+        return PHASE_CONFIG[self.phase]
+
+    def _is_hunt_phase(self) -> bool:
+        return self.phase == "hunt" and self.role == "predator"
+
     def _build_environment(self) -> None:
-        """Lay out a fresh, random environment scaled to the current level:
-        goals at the level's distance plus some random obstacle walls."""
+        """Rebuild a random environment for the current phase + level."""
         self.world.clear_food()
         self.world.clear_walls()
         # Goals.
-        if self.role == "predator":
+        cfg = self._phase_cfg()
+        if self._is_hunt_phase():
             for p in list(self.prey):
                 self.world.remove_creature(p)
             self.prey = []
@@ -176,19 +217,22 @@ class EvolutionTrainer:
                 self.prey.append(self.world.add_creature(
                     CreatureMorphology(), self._goal_point(), role="forager"))
         else:
-            for _ in range(FOOD_TARGET):
-                self.world.add_food(*self._goal_point())
-        # Random obstacles (kept clear of the start so nobody spawns inside one).
-        n_obs = min((self.level - 1) * OBSTACLES_PER_LEVEL, MAX_OBSTACLES)
+            # Predators in non-hunt phases still chase food markers.
+            for _ in range(cfg["food_count"]):
+                self.world.add_food(*self._goal_point(),
+                                    smell_strength=cfg["food_smell"])
+        # Obstacles scaled by phase + level.
+        n_obs = int(min((self.level - 1) * OBSTACLES_PER_LEVEL
+                        * cfg["obstacle_mult"], MAX_OBSTACLES))
         sx, sy = self.start_pos
         for _ in range(n_obs):
             for _try in range(8):
                 x1 = float(self._rng.uniform(80, self.world.width - 80))
                 y1 = float(self._rng.uniform(80, self.world.height - 80))
-                if math.hypot(x1 - sx, y1 - sy) < 110:
+                if math.hypot(x1 - sx, y1 - sy) < 120:
                     continue
                 ang = self._rng.uniform(0, 2 * math.pi)
-                length = float(self._rng.uniform(70, 150))
+                length = float(self._rng.uniform(70, 160))
                 x2 = float(np.clip(x1 + math.cos(ang) * length, 40,
                                    self.world.width - 40))
                 y2 = float(np.clip(y1 + math.sin(ang) * length, 40,
@@ -196,36 +240,23 @@ class EvolutionTrainer:
                 self.world.add_wall(x1, y1, x2, y2)
                 break
 
-    def _reset_positions(self) -> None:
-        """Send every creature back to the shared start with fresh fitness."""
-        for ind in self.population:
-            ind.creature.alive = True
-            ind.creature.energy = config.START_ENERGY
-            ind.creature.teleport(*self.start_pos)
-            ind.fitness = 0.0
-            ind.prev_dist = self._target_dist(ind.creature)
-
-    def _advance_level(self) -> None:
-        self.level += 1
-        self._win_streak = 0
-        self._build_environment()
-        self._reset_positions()
-
-    def _maybe_auto_advance(self) -> None:
-        """Level up automatically once the population reliably solves a level."""
-        if not self.auto_advance:
-            self._win_streak = 0
-            return
-        if self._gen_best >= ADVANCE_FITNESS:
-            self._win_streak += 1
-            if self._win_streak >= AUTO_WINS:
-                self._advance_level()
+    def _ensure_targets(self) -> None:
+        cfg = self._phase_cfg()
+        if self._is_hunt_phase():
+            self.prey = [p for p in self.prey if p.alive]
+            while len(self.prey) < PREY_COUNT:
+                self.prey.append(self.world.add_creature(
+                    CreatureMorphology(), self._goal_point(), role="forager"))
         else:
-            self._win_streak = 0
+            live = [f for f in self.world.food if not f.eaten]
+            self.world.food = live
+            while len(self.world.food) < cfg["food_count"]:
+                self.world.add_food(*self._goal_point(),
+                                    smell_strength=cfg["food_smell"])
 
     def _target_dist(self, creature) -> float:
         cx, cy = creature.position
-        if self.role == "predator":
+        if self._is_hunt_phase():
             tgt = self.world.nearest_creature(cx, cy, role="forager")
             pt = tgt.position if tgt else None
         else:
@@ -235,21 +266,7 @@ class EvolutionTrainer:
             return space_builder._world_diag(self.world)
         return math.hypot(pt[0] - cx, pt[1] - cy)
 
-    def _ensure_targets(self) -> None:
-        """Top up goals eaten/caught mid-generation at the level's distance."""
-        if self.role == "predator":
-            self.prey = [p for p in self.prey if p.alive]
-            while len(self.prey) < PREY_COUNT:
-                self.prey.append(self.world.add_creature(
-                    CreatureMorphology(), self._goal_point(), role="forager"))
-        else:
-            live = [f for f in self.world.food if not f.eaten]
-            self.world.food = live
-            while len(self.world.food) < FOOD_TARGET:
-                self.world.add_food(*self._goal_point())
-
     def _drift_prey(self) -> None:
-        """Scripted prey wander and flee the nearest predator a little."""
         for p in self.prey:
             if not p.alive:
                 continue
@@ -266,66 +283,188 @@ class EvolutionTrainer:
             p.hub.velocity = (vx / n * PREY_FLEE_SPEED * 30.0,
                               vy / n * PREY_FLEE_SPEED * 30.0)
 
-    # -- the loop -----------------------------------------------------------
+    # ----- population ops -------------------------------------------------
+    def _spawn_individual(self, policy: MLPPolicy) -> _Individual:
+        creature = self.world.add_creature(
+            self.morph, self.start_pos, self.start_angle, role=self.role)
+        ind = _Individual(creature=creature, policy=policy)
+        ind.prev_dist = self._target_dist(creature)
+        return ind
+
+    def _reset_positions(self) -> None:
+        for ind in self.population:
+            ind.creature.alive = True
+            ind.creature.energy = config.START_ENERGY
+            ind.creature.teleport(*self.start_pos)
+            ind.fitness = 0.0
+            ind.prev_dist = self._target_dist(ind.creature)
+
+    def _tournament(self, pool: list[_Individual]) -> _Individual:
+        k = min(TOURNAMENT_K, len(pool))
+        if k <= 0:
+            return self.population[0]
+        idx = self._rng.choice(len(pool), size=k, replace=False)
+        return max((pool[int(i)] for i in idx), key=lambda i: i.fitness)
+
+    def _breed_child(self, pool: list[_Individual]) -> MLPPolicy:
+        a = self._tournament(pool).policy
+        b = self._tournament(pool).policy
+        child = MLPPolicy.crossover(a, b, self._rng)
+        return child.mutate(self.effective_mutation, self._rng)
+
+    def _select_and_breed(self) -> None:
+        self.population.sort(key=lambda i: i.fitness, reverse=True)
+        survivors = self.population[:max(1, self.survivors)]
+        self._gen_best = survivors[0].fitness if survivors else 0.0
+        improved = self._gen_best > self.best_fitness + 1e-3
+        if improved:
+            self.best_fitness = self._gen_best
+            self.best_policy = survivors[0].policy.clone()
+            self._stagnation = 0
+        else:
+            self._stagnation += 1
+
+        # Cull losers.
+        for loser in self.population[len(survivors):]:
+            self.world.remove_creature(loser.creature)
+
+        new_pop: list[_Individual] = []
+        # Elite survivors carried over verbatim (their fitness resets).
+        for s in survivors:
+            s.fitness = 0.0
+            s.prev_dist = self._target_dist(s.creature)
+            new_pop.append(s)
+        # Hall of fame: re-inject the all-time best when we're stuck.
+        if (self.best_policy is not None and self._stagnation >= 3
+                and len(new_pop) < self.pop_size):
+            new_pop.append(self._spawn_individual(self.best_policy.clone()))
+        # Fill the rest with crossover+mutation offspring.
+        while len(new_pop) < self.pop_size:
+            new_pop.append(self._spawn_individual(self._breed_child(survivors)))
+        # If pop_size was shrunk live, trim the tail.
+        while len(new_pop) > self.pop_size:
+            extra = new_pop.pop()
+            if extra.creature in self.world.creatures:
+                self.world.remove_creature(extra.creature)
+        self.population = new_pop
+
+    # ----- curriculum -----------------------------------------------------
+    def _advance_level(self) -> None:
+        self.level += 1
+        self._win_streak = 0
+        self._build_environment()
+        self._reset_positions()
+
+    def _set_phase(self, name: str) -> None:
+        if name not in PHASES or name == self.phase:
+            return
+        self.phase = name
+        self.level = 1
+        self._win_streak = 0
+        self._stagnation = 0
+        self._build_environment()
+        self._reset_positions()
+
+    def _next_phase(self) -> str | None:
+        order = (PHASE_ORDER_PREDATOR if self.role == "predator"
+                 else PHASE_ORDER_FORAGER)
+        if self.phase not in order:
+            return None
+        idx = order.index(self.phase)
+        return order[idx + 1] if idx + 1 < len(order) else None
+
+    def _maybe_auto_advance(self) -> None:
+        if not self.auto_advance:
+            self._win_streak = 0
+            return
+        if self._gen_best >= ADVANCE_FITNESS:
+            self._win_streak += 1
+            if self._win_streak >= AUTO_WINS:
+                # After a few levels in a phase, jump to the next phase.
+                if self.level >= 4:
+                    nxt = self._next_phase()
+                    if nxt is not None:
+                        self._set_phase(nxt)
+                        return
+                self._advance_level()
+        else:
+            self._win_streak = 0
+
+    # ----- the loop -------------------------------------------------------
     def _run(self) -> None:
         try:
             with self.ctrl.lock:
                 self._build_environment()
-                for _ in range(POP_SIZE):
+                for _ in range(self.pop_size):
                     self.population.append(self._spawn_individual(
                         MLPPolicy(self.obs_dim, self.act_dim, rng=self._rng)))
             self._emit(timesteps=0, total=0, mean_reward=0.0)
 
             step_in_gen = 0
             while not self._stop.is_set():
-                self._await_clock()
+                # Pause check (no work while paused).
+                paused, sps = self.ctrl.snapshot_speed()
+                if paused:
+                    time.sleep(0.05)
+                    continue
+
+                target_dt = (1.0 / sps) if sps > 0 else 0.0
+                # Batch ticks so we release the lock only ~60 times/sec
+                # regardless of the sim rate. Critical for 10k+ steps/sec.
+                if sps > 120:
+                    batch = max(1, min(int(sps / 60), 400))
+                else:
+                    batch = 1
+
                 t0 = time.perf_counter()
                 with self.ctrl.lock:
-                    self._tick()
-                step_in_gen += 1
-                self.total_steps += 1
-
-                if step_in_gen >= GEN_STEPS:
-                    with self.ctrl.lock:
-                        self._select_and_breed()
-                        # New generation: same start, fresh random environment.
-                        self._build_environment()
-                        self._reset_positions()
-                        self._maybe_auto_advance()
-                    step_in_gen = 0
-                    self.generation += 1
-                    self._emit(timesteps=self.total_steps, total=0,
-                               mean_reward=self.best_fitness)
-
-                self._throttle(t0)
+                    for _ in range(batch):
+                        if self._stop.is_set():
+                            break
+                        self._tick()
+                        step_in_gen += 1
+                        self.total_steps += 1
+                        if step_in_gen >= self.gen_steps:
+                            self._select_and_breed()
+                            self._build_environment()
+                            self._reset_positions()
+                            self._maybe_auto_advance()
+                            step_in_gen = 0
+                            self.generation += 1
+                            self._emit(timesteps=self.total_steps, total=0,
+                                       mean_reward=self.best_fitness)
+                # Pace outside the lock so rendering can grab it.
+                if target_dt > 0:
+                    ideal = target_dt * batch
+                    elapsed = time.perf_counter() - t0
+                    if elapsed < ideal:
+                        time.sleep(ideal - elapsed)
 
             self._finish_ok()
-        except Exception as exc:  # surface to UI instead of hanging
+        except Exception as exc:  # surface to UI rather than hang
             self._emit(timesteps=0, total=0, mean_reward=0.0,
                        done=True, error=str(exc))
         finally:
             self._running = False
 
     def _tick(self) -> None:
-        # 1. user influence (place/clear food, drag the leader, walls).
         self._apply_commands()
         self._ensure_targets()
 
-        # 2. every brain senses and acts.
+        # Every brain senses and acts.
         for ind in self.population:
             if not ind.creature.alive:
                 continue
             obs = space_builder.observe(self.world, ind.creature)
             ind.creature.apply_action(ind.policy.act(obs))
-        if self.role == "predator":
+        if self._is_hunt_phase():
             self._drift_prey()
 
-        # 3. advance the shared world once.
         eats = self.world.step(config.SIM_DT)
         ate = {id(c) for c, _ in eats}
         caught = {id(p) for p, _ in self.world.catches}
 
-        # 4. score everyone on progress toward their goal (+ reaching it).
+        # Score: shaped progress + a big bonus for actually reaching the goal.
         for ind in self.population:
             c = ind.creature
             if not c.alive:
@@ -337,13 +476,13 @@ class EvolutionTrainer:
                 ind.fitness += 10.0
                 ind.prev_dist = self._target_dist(c)
 
-        # 5. respawn prey that got caught so the hunt continues.
+        # Caught prey: respawn elsewhere so the chase continues.
         if self.world.catches:
             for _pred, victim in self.world.catches:
                 victim.alive = True
                 victim.teleport(*self._goal_point())
 
-        # 6. manual Treat / Scold lands on the current leader.
+        # Manual Treat / Scold lands on the current leader.
         bump = self.ctrl.take_reward()
         if bump and self.population:
             leader = max((i for i in self.population if i.creature.alive),
@@ -355,62 +494,42 @@ class EvolutionTrainer:
         leader = max((i for i in self.population if i.creature.alive),
                      key=lambda i: i.fitness, default=None)
         for cmd in self.ctrl.drain_commands():
-            if cmd.kind == "food":
-                self.world.add_food(cmd.x, cmd.y)
-            elif cmd.kind == "clear_food":
+            k = cmd.kind
+            if k == "food":
+                self.world.add_food(cmd.x, cmd.y,
+                                    smell_strength=self._phase_cfg()["food_smell"])
+            elif k == "clear_food":
                 self.world.clear_food()
-            elif cmd.kind == "drag" and leader is not None:
+            elif k == "drag" and leader is not None:
                 leader.creature.teleport(cmd.x, cmd.y)
-            elif cmd.kind == "reset_pose" and leader is not None:
+            elif k == "reset_pose" and leader is not None:
                 leader.creature.teleport(*self.start_pos)
-            elif cmd.kind == "wall":
+            elif k == "wall":
                 self.world.add_wall(cmd.x, cmd.y, cmd.x2, cmd.y2)
-            elif cmd.kind == "advance_level":
+            elif k == "advance_level":
                 self._advance_level()
-            elif cmd.kind == "auto_advance":
+            elif k == "auto_advance":
                 self.auto_advance = bool(cmd.x)
+            elif k == "set_mutation":
+                self.user_mutation = float(np.clip(cmd.x, 0.0, 1.0))
+            elif k == "set_pop":
+                self.pop_size = int(np.clip(cmd.x, 2, 128))
+                # Trim immediately if it shrank; growth happens at next gen.
+                while len(self.population) > self.pop_size:
+                    extra = self.population.pop()
+                    if extra.creature in self.world.creatures:
+                        self.world.remove_creature(extra.creature)
+                while len(self.population) < self.pop_size:
+                    self.population.append(self._spawn_individual(
+                        MLPPolicy(self.obs_dim, self.act_dim, rng=self._rng)))
+            elif k == "set_survivors":
+                self.survivors = int(np.clip(cmd.x, 1, max(1, self.pop_size - 1)))
+            elif k == "set_gen_steps":
+                self.gen_steps = int(np.clip(cmd.x, 50, 5000))
+            elif k == "set_phase":
+                self._set_phase(cmd.label)
 
-    def _select_and_breed(self) -> None:
-        """Rank the population; keep the best, cull and replace the rest."""
-        self.population.sort(key=lambda i: i.fitness, reverse=True)
-        survivors = self.population[:SURVIVORS]
-        self._gen_best = survivors[0].fitness if survivors else 0.0
-        if survivors and survivors[0].fitness > self.best_fitness:
-            self.best_fitness = survivors[0].fitness
-            self.best_policy = survivors[0].policy.clone()
-
-        # Kill off the losers (they visibly disappear from the world).
-        for loser in self.population[SURVIVORS:]:
-            self.world.remove_creature(loser.creature)
-
-        new_pop: list[_Individual] = []
-        for s in survivors:
-            s.fitness = 0.0
-            s.prev_dist = self._target_dist(s.creature)
-            new_pop.append(s)
-        while len(new_pop) < POP_SIZE:
-            parent = survivors[self._rng.integers(len(survivors))]
-            child = parent.policy.mutate(MUTATION, self._rng)
-            new_pop.append(self._spawn_individual(child))
-        self.population = new_pop
-
-    # -- pacing -------------------------------------------------------------
-    def _await_clock(self) -> None:
-        while not self._stop.is_set():
-            paused, sps = self.ctrl.snapshot_speed()
-            if not paused:
-                self._target_dt = (1.0 / sps) if sps > 0 else 0.0
-                return
-            time.sleep(0.05)
-
-    def _throttle(self, t0: float) -> None:
-        dt = getattr(self, "_target_dt", 0.0)
-        if dt > 0.0:
-            elapsed = time.perf_counter() - t0
-            if elapsed < dt:
-                time.sleep(dt - elapsed)
-
-    # -- finish -------------------------------------------------------------
+    # ----- finish ---------------------------------------------------------
     def _finish_ok(self) -> None:
         if self.best_policy is None and self.population:
             self.population.sort(key=lambda i: i.fitness, reverse=True)

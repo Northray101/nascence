@@ -29,6 +29,16 @@ from ..sim.world import World
 _NOSTRILS = config.NUM_NOSTRILS
 
 
+def _clip(x: float, lo: float, hi: float) -> float:
+    """Plain-python scalar clip — far cheaper than np.clip in a tight loop."""
+    return lo if x < lo else (hi if x > hi else x)
+
+
+def _tanh(x: float) -> float:
+    """Plain-python tanh (math.tanh is much faster than np.tanh on scalars)."""
+    return math.tanh(x)
+
+
 def observation_dim(morph: CreatureMorphology) -> int:
     return 3 * morph.num_actuators + 3 + _NOSTRILS + 2 + 3 + 3 + 1
 
@@ -73,7 +83,7 @@ def _emit_vision(obs, cx, cy, ang, point) -> None:
         return
     obs.append(math.sin(bearing))
     obs.append(math.cos(bearing))
-    obs.append(float(np.clip(dist / config.VISION_RANGE, 0.0, 1.0)))
+    obs.append(_clip(dist / config.VISION_RANGE, 0.0, 1.0))
 
 
 def _target_and_threat(world: World, creature: Creature):
@@ -93,42 +103,37 @@ def observe(world: World, creature: Creature) -> np.ndarray:
     ang = creature.angle
     diag = _world_diag(world)
 
-    # Per-joint proprioception.
+    rmax = config.LEG_MAX_RATE
     for rel_angle, ang_vel in creature.actuator_states():
         obs.append(math.sin(rel_angle))
         obs.append(math.cos(rel_angle))
-        obs.append(float(np.clip(ang_vel / config.LEG_MAX_RATE, -1.0, 1.0)))
+        obs.append(_clip(ang_vel / rmax, -1.0, 1.0))
 
     # Body velocity (body frame). Scale by a nominal max speed.
     vx, vy, av = creature.body_velocity_local()
-    vscale = 200.0
-    obs.append(float(np.clip(vx / vscale, -1.0, 1.0)))
-    obs.append(float(np.clip(vy / vscale, -1.0, 1.0)))
-    obs.append(float(np.clip(av / 6.0, -1.0, 1.0)))
+    obs.append(_clip(vx / 200.0, -1.0, 1.0))
+    obs.append(_clip(vy / 200.0, -1.0, 1.0))
+    obs.append(_clip(av / 6.0, -1.0, 1.0))
 
     # Smell at nostrils around the body.
+    br = creature.morph.body_radius * 1.5
+    chem = world.chem
     for i in range(_NOSTRILS):
         a = ang + (2.0 * math.pi * i) / _NOSTRILS
-        nx = cx + math.cos(a) * creature.morph.body_radius * 1.5
-        ny = cy + math.sin(a) * creature.morph.body_radius * 1.5
-        c = world.chem.sample(nx, ny)
-        obs.append(float(np.tanh(c)))
+        nx = cx + math.cos(a) * br
+        ny = cy + math.sin(a) * br
+        obs.append(_tanh(chem.sample(nx, ny)))
 
     # Smell gradient in body frame.
-    gx, gy = world.chem.gradient(cx, cy)
+    gx, gy = chem.gradient(cx, cy)
     gxb, gyb = _rotate_to_body(gx, gy, ang)
-    gmag = math.hypot(gxb, gyb) + 1e-9
-    obs.append(float(np.tanh(gxb)))
-    obs.append(float(np.tanh(gyb)))
+    obs.append(_tanh(gxb))
+    obs.append(_tanh(gyb))
 
-    # Target + threat depend on the creature's role:
-    #   forager:  target = nearest food,    threat = nearest predator
-    #   predator: target = nearest forager, threat = none
+    # Target + threat (vision cone — finite range, forward FOV).
     target, threat = _target_and_threat(world, creature)
     _emit_vision(obs, cx, cy, ang, target)
     _emit_vision(obs, cx, cy, ang, threat)
 
-    # Energy.
-    obs.append(float(np.clip(creature.energy, 0.0, 1.0)))
-
+    obs.append(_clip(creature.energy, 0.0, 1.0))
     return np.asarray(obs, dtype=np.float32)

@@ -95,8 +95,12 @@ class World:
         if creature in self.creatures:
             self.creatures.remove(creature)
 
-    def add_food(self, x: float, y: float) -> Food:
-        f = Food(x, y)
+    def add_food(self, x: float, y: float,
+                 smell_strength: float | None = None) -> Food:
+        if smell_strength is None:
+            f = Food(x, y)
+        else:
+            f = Food(x, y, smell_strength=smell_strength)
         self.food.append(f)
         return f
 

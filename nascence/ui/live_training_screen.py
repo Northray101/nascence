@@ -1,37 +1,54 @@
 """Live, interactive training: watch a whole population evolve in real time.
 
-This is the unified sandbox the project is built around. A *population* of
-creatures lives and learns by neuroevolution inside a shared, persistent world
-rendered here every frame: the best survive each generation and the rest are
-culled and replaced by mutated copies of the winners. While it runs you can:
+The unified sandbox the project is built around. A *population* of creatures
+lives and learns by neuroevolution inside a shared, persistent world rendered
+here every frame. The right-hand panel gives you live, click-friendly control
+over almost every training knob:
 
-* drop / clear food (Food tool)
-* drag the current leader around (Drag tool)
-* draw walls (Wall tool: click start, click end)
-* reward the leader now (Treat) or punish it now (Scold)
-* set the speed (slow to fast-forward) and pause
+* **Phase** dropdown — *Move* (point-to-point), *Forage* (food), *Maze*
+  (obstacles), or *Hunt* (predators chase prey).
+* **Tools**: drop / clear food, drag the current leader, draw walls.
+* **Treat / Scold**: shape the leader's behaviour right now.
+* **Difficulty**: advance level manually or leave Auto on.
+* **Tunables**: population, survivors, variation (mutation strength),
+  generation length — all live, no restart.
+* **Speed**: 2 → 10,000 ticks/sec. The trainer batches under one lock at high
+  speeds, so the sim can sprint while the GUI keeps drawing at ~60Hz.
 
-The best brain is saved automatically when you press "Save & stop".
+The best brain is saved automatically when you press *Save best & stop*.
 """
 
 from __future__ import annotations
 
 import pygame
 import pygame_gui
-from pygame_gui.elements import UIButton, UIHorizontalSlider, UILabel
+from pygame_gui.elements import (
+    UIButton, UIDropDownMenu, UIHorizontalSlider, UILabel,
+)
 
 from .. import config
 from ..render.camera import Camera
 from ..render.sim_renderer import draw_world
-from ..rl.evolution import EvolutionTrainer
+from ..rl.evolution import (
+    EvolutionTrainer, GEN_STEPS, MUTATION, POP_SIZE, SURVIVORS,
+)
 from ..rl.live_control import Command, SharedControl
 from ..sim.world import World
 from .screen import Screen
 
 _PANEL_W = 340
 _VIEW_W = config.WINDOW_WIDTH - _PANEL_W
-_TREAT = 6.0  # size of a manual reward / punishment
-_LIVE_TIMESTEPS = 5_000_000  # effectively "until you stop"
+_TREAT = 6.0
+_LIVE_TIMESTEPS = 50_000_000  # effectively "until you stop"
+_MAX_SPEED = 10_000
+
+# Human-readable phase choices in the dropdown.
+_PHASE_LABELS = {
+    "move":   "Phase 1: Move (point-to-point)",
+    "forage": "Phase 2: Forage (food + smell)",
+    "maze":   "Phase 3: Maze (obstacles)",
+    "hunt":   "Phase 4: Hunt (predator only)",
+}
 
 
 class LiveTrainingScreen(Screen):
@@ -39,10 +56,9 @@ class LiveTrainingScreen(Screen):
         super().__init__(app)
         self.species = species
 
-        # Shared world + control channel + the evolution engine (population).
         self.world = World()
         self.ctrl = SharedControl()
-        self.ctrl.set_speed(60.0)
+        self.ctrl.set_speed(120.0)
         self.trainer = EvolutionTrainer(
             self.world, self.ctrl,
             morph=species.morphology,
@@ -59,70 +75,99 @@ class LiveTrainingScreen(Screen):
         self.reward_history: list[float] = []
         self.timesteps = 0
         self.status = "Spawning the first generation…"
+        self.auto_advance = True
 
         self._build_panel()
 
-    # -- panel --------------------------------------------------------------
+    # -------- panel layout (a single, tightly-packed column) --------
     def _build_panel(self) -> None:
         px = _VIEW_W + 16
         w = _PANEL_W - 32
-        UILabel(relative_rect=pygame.Rect((px, 12), (w, 30)),
-                text=f"Training: {self.species.name}", manager=self.manager)
+        m = self.manager
 
-        UILabel(relative_rect=pygame.Rect((px, 50), (w, 24)),
-                text="Tools (click in the world):", manager=self.manager)
-        self.btn_food = UIButton(pygame.Rect((px, 78), (105, 38)),
-                                 "Food", self.manager)
-        self.btn_drag = UIButton(pygame.Rect((px + 110, 78), (95, 38)),
-                                 "Drag", self.manager)
-        self.btn_wall = UIButton(pygame.Rect((px + 210, 78), (95, 38)),
-                                 "Wall", self.manager)
-        self.btn_clear = UIButton(pygame.Rect((px, 120), (w, 30)),
-                                  "Clear all food", self.manager)
+        UILabel(pygame.Rect((px, 6), (w, 22)),
+                f"Training: {self.species.name}", m)
 
-        UILabel(relative_rect=pygame.Rect((px, 160), (w, 24)),
-                text="Teach it right now:", manager=self.manager)
-        self.btn_treat = UIButton(pygame.Rect((px, 188), (150, 44)),
-                                  "Treat  (+)", self.manager)
-        self.btn_scold = UIButton(pygame.Rect((px + 155, 188), (150, 44)),
-                                  "Scold  (–)", self.manager)
+        # -- phase dropdown ------------------------------------------------
+        UILabel(pygame.Rect((px, 30), (w, 20)), "Training phase:", m)
+        phase_opts = list(_PHASE_LABELS.values())
+        start_label = _PHASE_LABELS[self.trainer.phase]
+        self.phase_menu = UIDropDownMenu(
+            phase_opts, start_label,
+            pygame.Rect((px, 50), (w, 28)), m)
 
-        UILabel(relative_rect=pygame.Rect((px, 240), (w, 24)),
-                text="Difficulty (random levels):", manager=self.manager)
-        self.btn_level = UIButton(pygame.Rect((px, 266), (160, 38)),
-                                  "Advance level ▶", self.manager)
-        self.btn_auto = UIButton(pygame.Rect((px + 165, 266), (143, 38)),
-                                 "Auto: ON", self.manager)
-        self.auto_advance = True
+        # -- tools row ------------------------------------------------------
+        self.btn_food = UIButton(pygame.Rect((px, 84), (96, 28)), "Food", m)
+        self.btn_drag = UIButton(pygame.Rect((px + 100, 84), (96, 28)), "Drag", m)
+        self.btn_wall = UIButton(pygame.Rect((px + 200, 84), (108, 28)), "Wall", m)
+        self.btn_clear = UIButton(
+            pygame.Rect((px, 116), (w, 22)), "Clear all food", m)
 
-        self.speed_label = UILabel(pygame.Rect((px, 314), (w, 24)),
-                                   "Speed: 60 steps/s", self.manager)
+        # -- teach now ------------------------------------------------------
+        self.btn_treat = UIButton(pygame.Rect((px, 144), (148, 30)),
+                                  "Treat  (+)", m)
+        self.btn_scold = UIButton(pygame.Rect((px + 152, 144), (156, 30)),
+                                  "Scold  (–)", m)
+
+        # -- difficulty -----------------------------------------------------
+        self.btn_level = UIButton(pygame.Rect((px, 180), (148, 28)),
+                                  "Advance level ▶", m)
+        self.btn_auto = UIButton(pygame.Rect((px + 152, 180), (156, 28)),
+                                 "Auto: ON", m)
+
+        # -- live tunables (label + slider per row) ------------------------
+        self.pop_label = UILabel(pygame.Rect((px, 214), (w, 20)),
+                                 f"Population: {POP_SIZE}", m)
+        self.pop_slider = UIHorizontalSlider(
+            pygame.Rect((px, 234), (w, 16)), start_value=POP_SIZE,
+            value_range=(2, 48), manager=m)
+
+        self.surv_label = UILabel(pygame.Rect((px, 252), (w, 20)),
+                                  f"Survivors: {SURVIVORS}", m)
+        self.surv_slider = UIHorizontalSlider(
+            pygame.Rect((px, 272), (w, 16)), start_value=SURVIVORS,
+            value_range=(1, 12), manager=m)
+
+        self.var_label = UILabel(pygame.Rect((px, 290), (w, 20)),
+                                 f"Variation: {MUTATION:.2f}", m)
+        self.var_slider = UIHorizontalSlider(
+            pygame.Rect((px, 310), (w, 16)), start_value=MUTATION * 100,
+            value_range=(1, 80), manager=m)
+
+        self.gen_label = UILabel(pygame.Rect((px, 328), (w, 20)),
+                                 f"Gen length: {GEN_STEPS}", m)
+        self.gen_slider = UIHorizontalSlider(
+            pygame.Rect((px, 348), (w, 16)), start_value=GEN_STEPS,
+            value_range=(80, 2000), manager=m)
+
+        # -- speed (the marquee knob) --------------------------------------
+        self.speed_label = UILabel(pygame.Rect((px, 368), (w, 20)),
+                                   "Speed: 120 steps/s", m)
         self.speed_slider = UIHorizontalSlider(
-            pygame.Rect((px, 340), (w, 26)), start_value=60,
-            value_range=(2, 5000), manager=self.manager)
-        self.btn_pause = UIButton(pygame.Rect((px, 372), (w, 34)),
-                                  "Pause", self.manager)
+            pygame.Rect((px, 388), (w, 20)), start_value=120,
+            value_range=(2, _MAX_SPEED), manager=m)
 
-        self.btn_save = UIButton(pygame.Rect((px, 414), (w, 40)),
-                                 "Save best & stop", self.manager)
+        self.btn_pause = UIButton(pygame.Rect((px, 412), (w, 26)), "Pause", m)
+        self.btn_save = UIButton(pygame.Rect((px, 442), (w, 30)),
+                                 "Save best & stop", m)
         self.btn_back = UIButton(
-            pygame.Rect((px, config.WINDOW_HEIGHT - 52), (w, 38)),
-            "Back (save best)", self.manager)
+            pygame.Rect((px, config.WINDOW_HEIGHT - 40), (w, 30)),
+            "Back (save best)", m)
 
-        self.chart_rect = pygame.Rect(px, 464, w, 150)
+        self.chart_rect = pygame.Rect(px, 478, w, config.WINDOW_HEIGHT - 478 - 46)
 
     def on_enter(self) -> None:
         self.trainer.start(self.species, _LIVE_TIMESTEPS)
 
-    # -- events -------------------------------------------------------------
+    # -------- events -------------------------------------------------------
     def on_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame_gui.UI_BUTTON_PRESSED:
             self._on_button(event.ui_element)
         elif event.type == pygame_gui.UI_HORIZONTAL_SLIDER_MOVED:
-            if event.ui_element == self.speed_slider:
-                sps = float(self.speed_slider.get_current_value())
-                self.ctrl.set_speed(sps)
-                self.speed_label.set_text(f"Speed: {int(sps)} steps/s")
+            self._on_slider(event.ui_element)
+        elif event.type == pygame_gui.UI_DROP_DOWN_MENU_CHANGED:
+            if event.ui_element == self.phase_menu:
+                self._on_phase_change(event.text)
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1 and self.viewport.collidepoint(event.pos):
                 self._click_world(event.pos)
@@ -157,7 +202,8 @@ class LiveTrainingScreen(Screen):
             self.status = "Advancing to a harder level…"
         elif el == self.btn_auto:
             self.auto_advance = not self.auto_advance
-            self.ctrl.push(Command("auto_advance", x=1.0 if self.auto_advance else 0.0))
+            self.ctrl.push(Command("auto_advance",
+                                   x=1.0 if self.auto_advance else 0.0))
             self.btn_auto.set_text("Auto: ON" if self.auto_advance else "Auto: OFF")
         elif el == self.btn_pause:
             self.paused = not self.paused
@@ -166,7 +212,37 @@ class LiveTrainingScreen(Screen):
         elif el in (self.btn_save, self.btn_back):
             self.status = "Saving the best brain…"
             self.trainer.request_stop()
-            self.ctrl.set_paused(False)  # let the loop reach the stop check
+            self.ctrl.set_paused(False)
+
+    def _on_slider(self, el) -> None:
+        if el == self.speed_slider:
+            sps = float(self.speed_slider.get_current_value())
+            self.ctrl.set_speed(sps)
+            self.speed_label.set_text(f"Speed: {int(sps)} steps/s")
+        elif el == self.pop_slider:
+            v = int(self.pop_slider.get_current_value())
+            self.pop_label.set_text(f"Population: {v}")
+            self.ctrl.push(Command("set_pop", x=float(v)))
+        elif el == self.surv_slider:
+            v = int(self.surv_slider.get_current_value())
+            self.surv_label.set_text(f"Survivors: {v}")
+            self.ctrl.push(Command("set_survivors", x=float(v)))
+        elif el == self.var_slider:
+            v = float(self.var_slider.get_current_value()) / 100.0
+            self.var_label.set_text(f"Variation: {v:.2f}")
+            self.ctrl.push(Command("set_mutation", x=v))
+        elif el == self.gen_slider:
+            v = int(self.gen_slider.get_current_value())
+            self.gen_label.set_text(f"Gen length: {v}")
+            self.ctrl.push(Command("set_gen_steps", x=float(v)))
+
+    def _on_phase_change(self, text: str) -> None:
+        for key, lbl in _PHASE_LABELS.items():
+            if lbl == text:
+                self.ctrl.push(Command("set_phase", label=key))
+                self.reward_history.clear()
+                self.status = f"Switching to {lbl}…"
+                return
 
     def _click_world(self, pos) -> None:
         wx, wy = self.camera.screen_to_world(*pos)
@@ -183,7 +259,7 @@ class LiveTrainingScreen(Screen):
                 self.ctrl.push(Command("wall", x=x1, y=y1, x2=wx, y2=wy))
                 self._wall_start = None
 
-    # -- per-frame ----------------------------------------------------------
+    # -------- per-frame ----------------------------------------------------
     def update(self, dt: float) -> None:
         super().update(dt)
         for p in self.trainer.drain():
@@ -192,9 +268,11 @@ class LiveTrainingScreen(Screen):
                 self.reward_history.append(p.mean_reward)
             if not p.done and self.trainer.running:
                 self.status = (
-                    f"Level {self.trainer.level}   "
-                    f"Gen {self.trainer.generation}   "
-                    f"best score: {p.mean_reward:.1f}"
+                    f"{self.trainer.phase.upper()}  "
+                    f"Lv {self.trainer.level}  "
+                    f"Gen {self.trainer.generation}  "
+                    f"best {p.mean_reward:.1f}  "
+                    f"μ={self.trainer.effective_mutation:.2f}"
                 )
             if p.done:
                 if p.error:
@@ -204,7 +282,7 @@ class LiveTrainingScreen(Screen):
                     self.app.set_screen(SpeciesManager(self.app))
                     return
 
-    # -- drawing ------------------------------------------------------------
+    # -------- drawing ------------------------------------------------------
     def pre_draw_ui(self, surface: pygame.Surface) -> None:
         with self.ctrl.lock:
             draw_world(surface, self.viewport, self.world, self.camera,
@@ -223,19 +301,21 @@ class LiveTrainingScreen(Screen):
 
     def _draw_chart(self, surface, font) -> None:
         r = self.chart_rect
+        if r.height < 40:
+            return
         pygame.draw.rect(surface, (24, 30, 46), r, border_radius=8)
         pygame.draw.rect(surface, (70, 82, 110), r, width=2, border_radius=8)
-        surface.blit(font.render("Best score per generation (rising = evolving)",
-                                 True, (170, 185, 210)), (r.x + 8, r.y + 6))
+        surface.blit(font.render("Best score / generation",
+                                 True, (170, 185, 210)), (r.x + 8, r.y + 4))
         data = self.reward_history
         if len(data) < 2:
             return
         lo, hi = min(data), max(data)
         if hi - lo < 1e-6:
             hi = lo + 1.0
-        pad = 34
-        plot = pygame.Rect(r.x + pad, r.y + pad, r.width - pad - 12,
-                           r.height - pad - 16)
+        pad = 26
+        plot = pygame.Rect(r.x + pad, r.y + pad, r.width - pad - 8,
+                           r.height - pad - 8)
         n = len(data)
         pts = [(plot.x + plot.width * i / (n - 1),
                 plot.bottom - plot.height * (v - lo) / (hi - lo))

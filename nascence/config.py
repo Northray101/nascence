@@ -25,7 +25,9 @@ WORLD_HEIGHT = 1200.0
 # Fixed simulation timestep (seconds). We step the physics in small substeps
 # for stability regardless of frame rate.
 SIM_DT = 1.0 / 60.0
-PHYSICS_SUBSTEPS = 3
+# Fewer substeps = much faster training. 1 is fine for the gentle springs and
+# small motors used here; bump back up to 2 if you see physics jitter.
+PHYSICS_SUBSTEPS = 1
 
 # Top-down "fluid": Pymunk global damping = fraction of velocity *kept* per
 # second (0.85 means 15% of speed is lost each second). Low, isotropic — most

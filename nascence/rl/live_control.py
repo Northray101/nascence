@@ -20,13 +20,19 @@ from dataclasses import dataclass
 
 @dataclass
 class Command:
-    # "food" | "clear_food" | "drag" | "wall" | "reset_pose"
-    #   | "advance_level" | "auto_advance" (x = 1 on / 0 off)
+    # Spatial:   "food" | "clear_food" | "drag" | "wall" | "reset_pose"
+    # Difficulty:"advance_level" | "auto_advance" (x = 1 on / 0 off)
+    # Tunables:  "set_mutation"  (x = rate)
+    #            "set_pop"       (x = new population size)
+    #            "set_survivors" (x = N)
+    #            "set_gen_steps" (x = steps per generation)
+    #            "set_phase"     (label = phase name)
     kind: str
     x: float = 0.0
     y: float = 0.0
     x2: float = 0.0
     y2: float = 0.0
+    label: str = ""
 
 
 class SharedControl:

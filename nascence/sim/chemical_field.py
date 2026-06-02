@@ -28,8 +28,15 @@ class ChemicalField:
 
     # -- coordinate helpers -------------------------------------------------
     def _cell(self, x: float, y: float) -> tuple[int, int]:
-        c = int(np.clip(x / self.world_width * self.cols, 0, self.cols - 1))
-        r = int(np.clip(y / self.world_height * self.rows, 0, self.rows - 1))
+        # Plain-python clamp — np.clip on scalars is ~10x slower in tight loops.
+        cmax = self.cols - 1
+        rmax = self.rows - 1
+        c = int(x / self.world_width * self.cols)
+        r = int(y / self.world_height * self.rows)
+        if c < 0: c = 0
+        elif c > cmax: c = cmax
+        if r < 0: r = 0
+        elif r > rmax: r = rmax
         return r, c
 
     # -- mutation -----------------------------------------------------------

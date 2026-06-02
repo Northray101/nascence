@@ -54,13 +54,20 @@ class Creature:
             b.angular_velocity = 0.0
 
     # -- control ------------------------------------------------------------
-    def apply_action(self, action: np.ndarray) -> None:
+    def apply_action(self, action) -> None:
         """Set every joint motor's target rate from a [-1, 1] action vector."""
-        for k, (_leg, _j, motor) in enumerate(self._motors()):
-            if k >= len(action):
+        rmax = self.morph.leg_max_rate
+        n = len(action)
+        k = 0
+        for _leg, _j, motor in self._motors():
+            if k >= n:
                 break
-            a = float(np.clip(action[k], -1.0, 1.0))
-            motor.rate = a * self.morph.leg_max_rate
+            a = float(action[k])
+            # Plain-python clip (np.clip on scalars is many times slower).
+            if a < -1.0: a = -1.0
+            elif a > 1.0: a = 1.0
+            motor.rate = a * rmax
+            k += 1
 
     # -- proprioception -----------------------------------------------------
     def actuator_states(self) -> list[tuple[float, float]]:
