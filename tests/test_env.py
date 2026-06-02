@@ -55,6 +55,30 @@ def test_eating_gives_energy_and_reward():
     assert creature.energy > 0.1
 
 
+def test_live_env_influence():
+    from nascence.rl.live_control import Command, SharedControl
+    from nascence.rl.live_env import LiveCreatureEnv
+
+    world = World()
+    ctrl = SharedControl()
+    ctrl.set_speed(0.0)  # unthrottled so the test doesn't sleep
+    env = LiveCreatureEnv(world, ctrl)
+    obs, _ = env.reset()
+    assert obs.shape == env.observation_space.shape
+
+    ctrl.push(Command("clear_food"))
+    ctrl.push(Command("food", x=700, y=600))
+    ctrl.push(Command("wall", x=100, y=100, x2=300, y2=100))
+    ctrl.push(Command("drag", x=650, y=600))
+    ctrl.add_reward(5.0)
+    obs, reward, terminated, truncated, _ = env.step(env.action_space.sample())
+
+    assert reward >= 4.5  # the manual treat is included
+    assert not terminated  # live mode never "dies" mid-show
+    assert len(world.user_walls) == 1
+    assert round(env.creature.position[0]) == 650  # drag teleported it
+
+
 def test_morphology_roundtrip():
     morph = CreatureMorphology(num_legs=5, body_radius=30.0)
     restored = CreatureMorphology.from_dict(morph.to_dict())

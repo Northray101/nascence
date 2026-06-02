@@ -34,6 +34,8 @@ class World:
 
         self.creatures: list[Creature] = []
         self.food: list[Food] = []
+        # User-placed walls, kept as endpoint pairs for rendering.
+        self.user_walls: list[tuple[float, float, float, float]] = []
         self.chem = ChemicalField(width, height)
 
         self._add_walls()
@@ -85,6 +87,15 @@ class World:
         f = Food(x, y)
         self.food.append(f)
         return f
+
+    def add_wall(self, x1: float, y1: float, x2: float, y2: float,
+                 thickness: float = 8.0) -> None:
+        seg = pymunk.Segment(self.space.static_body, (x1, y1), (x2, y2),
+                             thickness)
+        seg.friction = 0.5
+        seg.collision_type = CT_WALL
+        self.space.add(seg)
+        self.user_walls.append((x1, y1, x2, y2))
 
     def clear_food(self) -> None:
         self.food.clear()

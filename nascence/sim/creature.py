@@ -36,6 +36,16 @@ class Creature:
     def angle(self) -> float:
         return self.body.hub.angle
 
+    # -- placement ----------------------------------------------------------
+    def teleport(self, x: float, y: float) -> None:
+        """Move the whole creature (hub + legs) so it keeps its shape."""
+        hub = self.body.hub
+        dx, dy = x - hub.position.x, y - hub.position.y
+        for b in self.body.all_bodies():
+            b.position = (b.position.x + dx, b.position.y + dy)
+            b.velocity = (0.0, 0.0)
+            b.angular_velocity = 0.0
+
     # -- control ------------------------------------------------------------
     def apply_action(self, action: np.ndarray) -> None:
         """Set each leg motor's target rate from a [-1, 1] action vector."""

@@ -34,6 +34,11 @@ def draw_world(
 
     _draw_walls(surface, world, camera)
 
+    for (x1, y1, x2, y2) in world.user_walls:
+        pygame.draw.line(surface, COL_WALL,
+                         camera.world_to_screen(x1, y1),
+                         camera.world_to_screen(x2, y2), 5)
+
     for f in world.food:
         if f.eaten:
             continue

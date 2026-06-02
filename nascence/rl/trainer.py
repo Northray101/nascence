@@ -42,13 +42,15 @@ class Trainer:
         return self._running
 
     # -- control ------------------------------------------------------------
-    def start(self, species: Species, total_timesteps: int) -> None:
+    def start(self, species: Species, total_timesteps: int, env=None) -> None:
+        """Start training. If ``env`` is given (e.g. a live, shared world) it is
+        used as-is; otherwise a fresh headless CreatureEnv is built."""
         if self._running:
             return
         self._stop.clear()
         self._running = True
         self._thread = threading.Thread(
-            target=self._run, args=(species, total_timesteps), daemon=True
+            target=self._run, args=(species, total_timesteps, env), daemon=True
         )
         self._thread.start()
 
@@ -66,15 +68,16 @@ class Trainer:
         return out
 
     # -- worker -------------------------------------------------------------
-    def _run(self, species: Species, total_timesteps: int) -> None:
+    def _run(self, species: Species, total_timesteps: int, env=None) -> None:
         try:
             # Heavy imports happen here, off the UI thread.
             from stable_baselines3 import PPO
             from stable_baselines3.common.callbacks import BaseCallback
 
-            from .creature_env import CreatureEnv
+            if env is None:
+                from .creature_env import CreatureEnv
 
-            env = CreatureEnv(morph=species.morphology)
+                env = CreatureEnv(morph=species.morphology)
             model = PPO("MlpPolicy", env, device="cpu", verbose=0)
 
             trainer = self

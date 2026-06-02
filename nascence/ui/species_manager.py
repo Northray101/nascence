@@ -195,9 +195,9 @@ class SpeciesManager(Screen):
             self.hint.set_text("Select a species first.")
             return
         species = registry.load(name)
-        from .training_screen import TrainingScreen
+        from .live_training_screen import LiveTrainingScreen
 
-        self.app.set_screen(TrainingScreen(self.app, species))
+        self.app.set_screen(LiveTrainingScreen(self.app, species))
 
     def _delete_selected(self) -> None:
         name = self._selected_name()
