@@ -22,8 +22,13 @@ two-jointed legs, and more.
 
 ## Setup (macOS) — one time
 
-You need **Python 3** (get it from <https://www.python.org/downloads/> if you
-don't have it). Then:
+You need **Python 3.10, 3.11, or 3.12**. Very new versions (3.13 / 3.14) don't
+have ready-to-install packages yet and will fail, so if you only have one of
+those, install **Python 3.12** from
+<https://www.python.org/downloads/macos/> (download the latest "Python 3.12.x"
+installer). `setup.sh` checks this for you and tells you what to do.
+
+Then:
 
 1. Open the **Terminal** app.
 2. Type `cd ` (with a space), then drag this project folder onto the Terminal
