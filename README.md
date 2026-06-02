@@ -21,12 +21,20 @@ This is an early rough-draft build with all the major pieces sketched in.
    - **Maze** — get to food past obstacle walls.
    - **Hunt** — predators chase fleeing prey.
 
+   The layout is **fixed and identical for every bot, every generation** — no
+   random luck. Everyone starts from the same spot in a neutral pose and is
+   rebuilt fresh each generation, so a bot is rewarded purely for **reaching
+   the goal, accurately and fast** — not for happening to spawn near it.
+   Fitness = completing goals (+ a speed bonus for doing it quickly) + how much
+   of the distance it genuinely closes (counted monotonically, so it can't be
+   farmed by wiggling back and forth).
+
    Each generation the **best survive**, the rest are **culled and replaced by
-   tournament-selected, crossed-over, mutated** offspring. If the species gets
-   stuck, mutation **bumps itself up automatically** and the all-time best
-   brain is **re-injected** to break the plateau. The environment is random
-   and ramps up by **level** (goals farther, more obstacles). Auto-advance
-   walks you through levels and phases as the species masters each one.
+   tournament-selected, crossed-over, mutated** offspring. If the species
+   plateaus, mutation **bumps itself up automatically** and the all-time best
+   brain is **re-injected** to break through. Difficulty ramps up by **level**
+   (goals farther, more obstacles); Auto-advance walks you through levels and
+   phases as the species masters each one.
 
    Live, no-restart sliders for **population**, **survivors**, **variation**
    (mutation strength) and **generation length** let you tune training as it

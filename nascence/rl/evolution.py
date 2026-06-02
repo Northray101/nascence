@@ -65,8 +65,24 @@ BASE_TARGET_DIST = 150.0
 DIST_PER_LEVEL = 70.0
 OBSTACLES_PER_LEVEL = 1
 MAX_OBSTACLES = 10
-ADVANCE_FITNESS = 12.0
+ADVANCE_FITNESS = 2.5       # normalised score that counts as "solving" a level
 AUTO_WINS = 2
+
+# ---------------------------------------------------------------------------
+# Fitness weights. Fitness is *normalised* so it's comparable across levels and
+# phases (no lucky-distance inflation) and *unbounded* (chaining goals keeps
+# adding), so good brains can always pull ahead instead of hitting a ceiling.
+#
+#   reach a goal           -> + GOAL_REWARD
+#   reach it quickly        -> + up to SPEED_REWARD (full if instant, 0 if it
+#                              took the whole generation)
+#   get closer to the goal  -> + up to PROGRESS_REWARD, measured as the fraction
+#                              of the starting distance closed (monotonic, so it
+#                              can't be farmed by oscillating back and forth)
+# ---------------------------------------------------------------------------
+GOAL_REWARD = 2.0
+SPEED_REWARD = 2.0
+PROGRESS_REWARD = 1.0
 
 # Phase-specific environment + scoring tweaks.
 PHASES = ("move", "forage", "maze", "hunt")
@@ -88,13 +104,20 @@ PHASE_ORDER_PREDATOR = ("move", "hunt", "maze")
 PREY_COUNT = 3
 PREY_FLEE_SPEED = 2.6
 
+# Goals are laid out deterministically (no luck): evenly spaced on a ring at the
+# level distance, the first one straight "up" from the shared start.
+_GOAL_START_ANGLE = -math.pi / 2
+
 
 @dataclass
 class _Individual:
     creature: object
     policy: MLPPolicy
     fitness: float = 0.0
-    prev_dist: float = 0.0
+    reached: int = 0            # goals completed this generation
+    best_dist: float = 0.0      # closest it has gotten to the current goal
+    start_dist: float = 1.0     # distance to the goal when it (re)started
+    goal_start_step: int = 0    # gen-step the current goal attempt began
 
 
 class EvolutionTrainer:
@@ -143,8 +166,10 @@ class EvolutionTrainer:
 
         # Internal bookkeeping.
         self._win_streak = 0
-        self._gen_best = 0.0
-        self._stagnation = 0
+        self._gen_best = 0.0          # best score in the most recent generation
+        self._gen_avg = 0.0           # average score in the most recent gen
+        self._gen_step = 0            # step within the current generation
+        self._stagnation = 0          # generations since best improved
 
     # ----- control API ----------------------------------------------------
     @property
@@ -189,13 +214,22 @@ class EvolutionTrainer:
         d = BASE_TARGET_DIST + (self.level - 1) * DIST_PER_LEVEL
         return min(d, 0.42 * min(self.world.width, self.world.height))
 
-    def _goal_point(self) -> tuple[float, float]:
+    def _goal_positions(self, n: int) -> list[tuple[float, float]]:
+        """Fixed, evenly-spaced goal positions at the level distance.
+
+        Deterministic: identical every generation, so every bot faces exactly
+        the same challenge and only skill — never a lucky layout — is rewarded.
+        """
         cx, cy = self.start_pos
-        ang = self._rng.uniform(0, 2 * math.pi)
-        d = self._target_distance() * self._rng.uniform(0.8, 1.15)
-        x = float(np.clip(cx + math.cos(ang) * d, 50, self.world.width - 50))
-        y = float(np.clip(cy + math.sin(ang) * d, 50, self.world.height - 50))
-        return x, y
+        d = self._target_distance()
+        n = max(1, n)
+        pts: list[tuple[float, float]] = []
+        for i in range(n):
+            ang = _GOAL_START_ANGLE + (2 * math.pi * i) / n
+            x = float(np.clip(cx + math.cos(ang) * d, 50, self.world.width - 50))
+            y = float(np.clip(cy + math.sin(ang) * d, 50, self.world.height - 50))
+            pts.append((x, y))
+        return pts
 
     def _phase_cfg(self) -> dict:
         return PHASE_CONFIG[self.phase]
@@ -204,35 +238,42 @@ class EvolutionTrainer:
         return self.phase == "hunt" and self.role == "predator"
 
     def _build_environment(self) -> None:
-        """Rebuild a random environment for the current phase + level."""
+        """Build the *fixed* environment for the current phase + level.
+
+        Goals and obstacles are deterministic, so the layout is the same for
+        every bot and every generation at a given phase/level — no randomness,
+        no luck. Difficulty still rises with the level (farther goals, more
+        obstacles), but the challenge is identical for everyone."""
         self.world.clear_food()
         self.world.clear_walls()
-        # Goals.
         cfg = self._phase_cfg()
         if self._is_hunt_phase():
             for p in list(self.prey):
                 self.world.remove_creature(p)
             self.prey = []
-            for _ in range(PREY_COUNT):
+            for pos in self._goal_positions(PREY_COUNT):
                 self.prey.append(self.world.add_creature(
-                    CreatureMorphology(), self._goal_point(), role="forager"))
+                    CreatureMorphology(), pos, role="forager"))
         else:
-            # Predators in non-hunt phases still chase food markers.
-            for _ in range(cfg["food_count"]):
-                self.world.add_food(*self._goal_point(),
-                                    smell_strength=cfg["food_smell"])
-        # Obstacles scaled by phase + level.
+            for pos in self._goal_positions(cfg["food_count"]):
+                self.world.add_food(*pos, smell_strength=cfg["food_smell"])
+
+        # Obstacles: deterministic per (phase, level) — same walls every time.
         n_obs = int(min((self.level - 1) * OBSTACLES_PER_LEVEL
                         * cfg["obstacle_mult"], MAX_OBSTACLES))
+        if n_obs <= 0:
+            return
+        seed = self.level * 131 + PHASES.index(self.phase) * 17
+        orng = np.random.default_rng(seed)
         sx, sy = self.start_pos
         for _ in range(n_obs):
             for _try in range(8):
-                x1 = float(self._rng.uniform(80, self.world.width - 80))
-                y1 = float(self._rng.uniform(80, self.world.height - 80))
+                x1 = float(orng.uniform(80, self.world.width - 80))
+                y1 = float(orng.uniform(80, self.world.height - 80))
                 if math.hypot(x1 - sx, y1 - sy) < 120:
                     continue
-                ang = self._rng.uniform(0, 2 * math.pi)
-                length = float(self._rng.uniform(70, 160))
+                ang = orng.uniform(0, 2 * math.pi)
+                length = float(orng.uniform(70, 160))
                 x2 = float(np.clip(x1 + math.cos(ang) * length, 40,
                                    self.world.width - 40))
                 y2 = float(np.clip(y1 + math.sin(ang) * length, 40,
@@ -241,18 +282,17 @@ class EvolutionTrainer:
                 break
 
     def _ensure_targets(self) -> None:
-        cfg = self._phase_cfg()
+        # Hunt: keep the fixed prey count topped up (prey move, so this is the
+        # only respawn). Foragers: food is a *fixed set* per generation — once
+        # eaten it stays gone, so fitness measures who collects the most fastest.
         if self._is_hunt_phase():
             self.prey = [p for p in self.prey if p.alive]
-            while len(self.prey) < PREY_COUNT:
-                self.prey.append(self.world.add_creature(
-                    CreatureMorphology(), self._goal_point(), role="forager"))
+            if len(self.prey) < PREY_COUNT:
+                for pos in self._goal_positions(PREY_COUNT)[len(self.prey):]:
+                    self.prey.append(self.world.add_creature(
+                        CreatureMorphology(), pos, role="forager"))
         else:
-            live = [f for f in self.world.food if not f.eaten]
-            self.world.food = live
-            while len(self.world.food) < cfg["food_count"]:
-                self.world.add_food(*self._goal_point(),
-                                    smell_strength=cfg["food_smell"])
+            self.world.food = [f for f in self.world.food if not f.eaten]
 
     def _target_dist(self, creature) -> float:
         cx, cy = creature.position
@@ -267,42 +307,53 @@ class EvolutionTrainer:
         return math.hypot(pt[0] - cx, pt[1] - cy)
 
     def _drift_prey(self) -> None:
+        # Deterministic: prey flee directly from the nearest predator, or ease
+        # back toward the centre when none is close. No randomness.
+        cx, cy = self._centre()
         for p in self.prey:
             if not p.alive:
                 continue
             px, py = p.position
             pred = self.world.nearest_creature(px, py, role="predator")
-            vx = self._rng.uniform(-1, 1)
-            vy = self._rng.uniform(-1, 1)
             if pred is not None:
                 dx, dy = px - pred.position[0], py - pred.position[1]
-                d = math.hypot(dx, dy) + 1e-6
-                vx += (dx / d) * 1.5
-                vy += (dy / d) * 1.5
-            n = math.hypot(vx, vy) + 1e-6
+            else:
+                dx, dy = cx - px, cy - py
+            n = math.hypot(dx, dy) + 1e-6
+            vx, vy = dx, dy
             p.hub.velocity = (vx / n * PREY_FLEE_SPEED * 30.0,
                               vy / n * PREY_FLEE_SPEED * 30.0)
 
     # ----- population ops -------------------------------------------------
+    def _start_goal(self, ind: _Individual) -> None:
+        """Begin (or restart) a goal attempt: snapshot the distance + the clock."""
+        d = self._target_dist(ind.creature)
+        ind.start_dist = max(d, 1.0)
+        ind.best_dist = d
+        ind.goal_start_step = self._gen_step
+
     def _spawn_individual(self, policy: MLPPolicy) -> _Individual:
         creature = self.world.add_creature(
             self.morph, self.start_pos, self.start_angle, role=self.role)
         ind = _Individual(creature=creature, policy=policy)
-        ind.prev_dist = self._target_dist(creature)
+        self._start_goal(ind)
         return ind
 
-    def _reset_positions(self) -> None:
+    def _respawn(self, policies: list[MLPPolicy]) -> None:
+        """Replace the whole population with fresh bodies for ``policies``.
+
+        Every creature is rebuilt from scratch at the shared start in a neutral
+        pose, so survivors and offspring alike begin each generation in *exactly*
+        the same physical state — identical conditions, no carry-over advantage.
+        """
         for ind in self.population:
-            ind.creature.alive = True
-            ind.creature.energy = config.START_ENERGY
-            ind.creature.teleport(*self.start_pos)
-            ind.fitness = 0.0
-            ind.prev_dist = self._target_dist(ind.creature)
+            self.world.remove_creature(ind.creature)
+        self.population = [self._spawn_individual(p) for p in policies]
 
     def _tournament(self, pool: list[_Individual]) -> _Individual:
         k = min(TOURNAMENT_K, len(pool))
         if k <= 0:
-            return self.population[0]
+            return pool[0]
         idx = self._rng.choice(len(pool), size=k, replace=False)
         return max((pool[int(i)] for i in idx), key=lambda i: i.fitness)
 
@@ -312,48 +363,40 @@ class EvolutionTrainer:
         child = MLPPolicy.crossover(a, b, self._rng)
         return child.mutate(self.effective_mutation, self._rng)
 
-    def _select_and_breed(self) -> None:
+    def _next_generation_policies(self) -> list[MLPPolicy]:
+        """Rank the finished generation and produce the next generation's brains.
+
+        Records the generation's best/avg, updates the hall of fame, then builds
+        the next brain list: elite survivors (verbatim) + crossover-mutation
+        offspring, with the all-time best re-injected when we're stuck.
+        """
         self.population.sort(key=lambda i: i.fitness, reverse=True)
         survivors = self.population[:max(1, self.survivors)]
         self._gen_best = survivors[0].fitness if survivors else 0.0
-        improved = self._gen_best > self.best_fitness + 1e-3
-        if improved:
+        self._gen_avg = (sum(i.fitness for i in self.population)
+                         / max(1, len(self.population)))
+
+        if self._gen_best > self.best_fitness + 1e-3:
             self.best_fitness = self._gen_best
             self.best_policy = survivors[0].policy.clone()
             self._stagnation = 0
         else:
             self._stagnation += 1
 
-        # Cull losers.
-        for loser in self.population[len(survivors):]:
-            self.world.remove_creature(loser.creature)
-
-        new_pop: list[_Individual] = []
-        # Elite survivors carried over verbatim (their fitness resets).
-        for s in survivors:
-            s.fitness = 0.0
-            s.prev_dist = self._target_dist(s.creature)
-            new_pop.append(s)
-        # Hall of fame: re-inject the all-time best when we're stuck.
+        policies: list[MLPPolicy] = [s.policy.clone() for s in survivors]
         if (self.best_policy is not None and self._stagnation >= 3
-                and len(new_pop) < self.pop_size):
-            new_pop.append(self._spawn_individual(self.best_policy.clone()))
-        # Fill the rest with crossover+mutation offspring.
-        while len(new_pop) < self.pop_size:
-            new_pop.append(self._spawn_individual(self._breed_child(survivors)))
-        # If pop_size was shrunk live, trim the tail.
-        while len(new_pop) > self.pop_size:
-            extra = new_pop.pop()
-            if extra.creature in self.world.creatures:
-                self.world.remove_creature(extra.creature)
-        self.population = new_pop
+                and len(policies) < self.pop_size):
+            policies.append(self.best_policy.clone())
+        while len(policies) < self.pop_size:
+            policies.append(self._breed_child(survivors))
+        return policies[:self.pop_size]
 
     # ----- curriculum -----------------------------------------------------
     def _advance_level(self) -> None:
         self.level += 1
         self._win_streak = 0
         self._build_environment()
-        self._reset_positions()
+        self._respawn([i.policy for i in self.population])
 
     def _set_phase(self, name: str) -> None:
         if name not in PHASES or name == self.phase:
@@ -363,7 +406,7 @@ class EvolutionTrainer:
         self._win_streak = 0
         self._stagnation = 0
         self._build_environment()
-        self._reset_positions()
+        self._respawn([i.policy for i in self.population])
 
     def _next_phase(self) -> str | None:
         order = (PHASE_ORDER_PREDATOR if self.role == "predator"
@@ -400,7 +443,7 @@ class EvolutionTrainer:
                         MLPPolicy(self.obs_dim, self.act_dim, rng=self._rng)))
             self._emit(timesteps=0, total=0, mean_reward=0.0)
 
-            step_in_gen = 0
+            self._gen_step = 0
             while not self._stop.is_set():
                 # Pause check (no work while paused).
                 paused, sps = self.ctrl.snapshot_speed()
@@ -422,17 +465,20 @@ class EvolutionTrainer:
                         if self._stop.is_set():
                             break
                         self._tick()
-                        step_in_gen += 1
+                        self._gen_step += 1
                         self.total_steps += 1
-                        if step_in_gen >= self.gen_steps:
-                            self._select_and_breed()
+                        if self._gen_step >= self.gen_steps:
+                            policies = self._next_generation_policies()
+                            self._gen_step = 0
                             self._build_environment()
-                            self._reset_positions()
+                            self._respawn(policies)
                             self._maybe_auto_advance()
-                            step_in_gen = 0
                             self.generation += 1
+                            # Report the *current* generation's best, so the
+                            # chart tracks live progress instead of freezing on
+                            # one lucky all-time peak.
                             self._emit(timesteps=self.total_steps, total=0,
-                                       mean_reward=self.best_fitness)
+                                       mean_reward=self._gen_best)
                 # Pace outside the lock so rendering can grab it.
                 if target_dt > 0:
                     ideal = target_dt * batch
@@ -464,23 +510,36 @@ class EvolutionTrainer:
         ate = {id(c) for c, _ in eats}
         caught = {id(p) for p, _ in self.world.catches}
 
-        # Score: shaped progress + a big bonus for actually reaching the goal.
+        # Score = completion + speed + (non-gameable) closeness, all normalised
+        # so it means the same thing regardless of level/phase distance.
+        gen_steps = max(1, self.gen_steps)
         for ind in self.population:
             c = ind.creature
             if not c.alive:
                 continue
-            dist = self._target_dist(c)
-            ind.fitness += (ind.prev_dist - dist) * 0.05
-            ind.prev_dist = dist
-            if id(c) in ate or id(c) in caught:
-                ind.fitness += 10.0
-                ind.prev_dist = self._target_dist(c)
+            reached = id(c) in ate or id(c) in caught
+            if reached:
+                # Completion + a speed bonus: the faster it got here, the more.
+                took = self._gen_step - ind.goal_start_step
+                speed = max(0.0, 1.0 - took / gen_steps)
+                ind.fitness += GOAL_REWARD + SPEED_REWARD * speed
+                ind.reached += 1
+                self._start_goal(ind)  # line up the next goal
+            else:
+                dist = self._target_dist(c)
+                if dist < ind.best_dist:
+                    # Reward only *new* closeness — monotonic, so wiggling back
+                    # and forth earns nothing.
+                    gained = (ind.best_dist - dist) / ind.start_dist
+                    ind.fitness += PROGRESS_REWARD * gained
+                    ind.best_dist = dist
 
-        # Caught prey: respawn elsewhere so the chase continues.
+        # Caught prey: respawn at the fixed ring so the chase continues.
         if self.world.catches:
-            for _pred, victim in self.world.catches:
+            home = self._goal_positions(PREY_COUNT)
+            for i, (_pred, victim) in enumerate(self.world.catches):
                 victim.alive = True
-                victim.teleport(*self._goal_point())
+                victim.teleport(*home[i % len(home)])
 
         # Manual Treat / Scold lands on the current leader.
         bump = self.ctrl.take_reward()
