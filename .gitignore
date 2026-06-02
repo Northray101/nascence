@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Project virtual environment (created by setup.sh)
+venv/
+
+# OS noise
+.DS_Store

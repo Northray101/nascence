@@ -1,0 +1,15 @@
+# nascence dependencies (pinned for reproducible installs on macOS)
+# Rendering + windowing (Community Edition has reliable Apple-Silicon wheels)
+pygame-ce==2.5.2
+# GUI widgets: buttons, lists, sliders, progress bars
+pygame_gui==0.6.13
+# 2D physics; soft jelly bodies & legs are composed from springs/motors
+pymunk==6.9.0
+# Reinforcement learning: PPO out of the box
+gymnasium==0.29.1
+stable-baselines3[extra]==2.3.2
+# Neural-net backend used by stable-baselines3 (CPU is fine)
+torch==2.3.1
+# Math + reward charts (matplotlib is rendered with the Agg backend, never shown)
+numpy==1.26.4
+matplotlib==3.9.2
