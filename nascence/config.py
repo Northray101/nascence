@@ -27,9 +27,19 @@ WORLD_HEIGHT = 1200.0
 SIM_DT = 1.0 / 60.0
 PHYSICS_SUBSTEPS = 3
 
-# Top-down "fluid": velocity damping per second. Acts like viscous water so a
-# leg stroke produces net body motion. 0 = frictionless, 1 = instant stop.
-FLUID_DAMPING = 0.4
+# Top-down "fluid": Pymunk global damping = fraction of velocity *kept* per
+# second (0.85 means 15% of speed is lost each second). Low, isotropic — most
+# locomotion comes from the anisotropic leg drag below, not this.
+FLUID_DAMPING = 0.85
+
+# Anisotropic drag on each leg, the source of swimming thrust. Drag across the
+# leg's broad face (perpendicular) is far stronger than along its length, so a
+# leg sweeping sideways pushes the creature forward (a paddle/oar). Without this
+# asymmetry, reciprocal leg motion produces zero net motion (scallop theorem).
+LEG_DRAG_PERP = 14.0
+LEG_DRAG_ALONG = 1.0
+# Mild drag on the body hub so momentum bleeds off realistically.
+BODY_DRAG = 3.0
 
 # ---------------------------------------------------------------------------
 # Creature defaults (a single morphology for the Phase-1 vertical slice)

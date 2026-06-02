@@ -29,9 +29,8 @@ class World:
 
         self.space = pymunk.Space()
         self.space.gravity = (0.0, 0.0)  # top-down: no gravity
-        # Velocity damping makes the world behave like viscous fluid so leg
-        # strokes translate into net motion.
-        self.space.damping = max(0.0, 1.0 - config.FLUID_DAMPING)
+        # Low, isotropic global damping; real thrust comes from leg drag.
+        self.space.damping = config.FLUID_DAMPING
 
         self.creatures: list[Creature] = []
         self.food: list[Food] = []
@@ -103,6 +102,31 @@ class World:
         return best
 
     # -- simulation ---------------------------------------------------------
+    def _apply_swimming_drag(self) -> None:
+        """Anisotropic drag on legs (paddle thrust) + light drag on each hub."""
+        for creature in self.creatures:
+            if not creature.alive:
+                continue
+            hub = creature.body.hub
+            hv = hub.velocity
+            hub.apply_force_at_world_point(
+                (-config.BODY_DRAG * hv.x, -config.BODY_DRAG * hv.y),
+                hub.position,
+            )
+            for leg in creature.body.legs:
+                seg = leg.segment
+                v = seg.velocity
+                ca, sa = math.cos(seg.angle), math.sin(seg.angle)
+                # Decompose velocity into along-leg (local x) and perpendicular.
+                along = v.x * ca + v.y * sa
+                perp = -v.x * sa + v.y * ca
+                fa = -config.LEG_DRAG_ALONG * along
+                fp = -config.LEG_DRAG_PERP * perp
+                # Recompose into world space.
+                fx = fa * ca - fp * sa
+                fy = fa * sa + fp * ca
+                seg.apply_force_at_world_point((fx, fy), seg.position)
+
     def step(self, dt: float = config.SIM_DT) -> list[tuple[Creature, Food]]:
         """Advance physics + smell one tick. Returns (creature, food) eats."""
         # Inject smell from every food source.
@@ -111,9 +135,11 @@ class World:
                 self.chem.emit(f.x, f.y, f.smell_strength)
         self.chem.step()
 
-        # Step physics in substeps for stability.
+        # Step physics in substeps for stability, applying swimming drag each
+        # substep (Pymunk clears applied forces after every step).
         sub_dt = dt / config.PHYSICS_SUBSTEPS
         for _ in range(config.PHYSICS_SUBSTEPS):
+            self._apply_swimming_drag()
             self.space.step(sub_dt)
 
         # Handle eating (distance-based, see Food docstring).

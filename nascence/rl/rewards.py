@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 @dataclass
 class RewardWeights:
-    progress: float = 1.0      # per unit of world-distance closed toward target
+    progress: float = 0.1      # per unit of world-distance closed toward target
     eat: float = 10.0          # bonus on eating a food pellet
     energy_cost: float = 0.02  # penalty per unit of total motor command
     time_cost: float = 0.005   # tiny per-step penalty to encourage promptness
