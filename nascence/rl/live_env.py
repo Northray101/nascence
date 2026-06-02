@@ -39,17 +39,22 @@ class LiveCreatureEnv(CreatureEnv):
         world: World,
         ctrl: SharedControl,
         morph: CreatureMorphology | None = None,
+        role: str = "forager",
     ) -> None:
-        super().__init__(morph=morph, max_steps=_LIVE_MAX_STEPS)
+        super().__init__(morph=morph, max_steps=_LIVE_MAX_STEPS, role=role)
         self.world = world
         self.ctrl = ctrl
         cx, cy = world.width * 0.5, world.height * 0.5
-        self.creature = world.add_creature(self.morph, (cx, cy))
+        self.creature = world.add_creature(self.morph, (cx, cy), role=role)
         self.creature.energy = config.START_ENERGY
-        if not world.food:
+        if role == "predator":
+            self.prey = world.add_creature(
+                CreatureMorphology(), self._random_point((cx, cy), 300.0),
+                role="forager")
+        elif not world.food:
             self._spawn_food((cx, cy), radius=300.0)
         self._steps = 0
-        self._prev_dist = self._dist_to_food()
+        self._prev_dist = self._target_dist()
         self._target_dt = 0.0
 
     # -- continuous, non-destructive reset ---------------------------------
@@ -58,10 +63,10 @@ class LiveCreatureEnv(CreatureEnv):
         # make sure there is something to chase.
         if self.creature is not None:
             self.creature.energy = config.START_ENERGY
-        if self.world is not None and not self.world.food:
+        if self.role != "predator" and self.world is not None and not self.world.food:
             self._spawn_food(self.creature.position, radius=300.0)
         self._steps = 0
-        self._prev_dist = self._dist_to_food()
+        self._prev_dist = self._target_dist()
         obs = space_builder.observe(self.world, self.creature)
         return obs, {}
 
@@ -98,8 +103,11 @@ class LiveCreatureEnv(CreatureEnv):
             self._apply_commands()
             action = np.asarray(action, dtype=np.float32)
             self.creature.apply_action(action)
+            if self.role == "predator":
+                self._move_prey()
             eats = self.world.step(config.SIM_DT)
             ate = any(c is self.creature for c, _ in eats)
+            caught = any(p is self.creature for p, _ in self.world.catches)
 
             self.creature.energy = max(
                 _ENERGY_FLOOR, self.creature.energy - self.energy_decay
@@ -107,18 +115,25 @@ class LiveCreatureEnv(CreatureEnv):
             if ate:
                 self.world.food = [f for f in self.world.food if not f.eaten]
                 self._spawn_food(self.creature.position, radius=350.0)
-                self._prev_dist = self._dist_to_food()
+                self._prev_dist = self._target_dist()
+            if caught and self.prey is not None:
+                self.prey.alive = True
+                self.prey.teleport(*self._random_point(
+                    self.creature.position, 350.0))
+                self._prev_dist = self._target_dist()
 
-            dist = self._dist_to_food()
+            dist = self._target_dist()
             obs = space_builder.observe(self.world, self.creature)
 
         action_mag = float(np.sum(np.abs(np.clip(action, -1.0, 1.0))))
-        from .rewards import forager_reward
+        from .rewards import forager_reward, predator_reward
 
-        reward = forager_reward(
-            prev_dist=self._prev_dist, dist=dist, ate=ate,
-            action_magnitude=action_mag, weights=self.weights,
-        )
+        if self.role == "predator":
+            reward = predator_reward(self._prev_dist, dist, caught, action_mag,
+                                     self.weights)
+        else:
+            reward = forager_reward(self._prev_dist, dist, ate, action_mag,
+                                    self.weights)
         reward += self.ctrl.take_reward()  # manual treat / scold
         self._prev_dist = dist
 

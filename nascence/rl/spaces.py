@@ -30,7 +30,7 @@ _NOSTRILS = config.NUM_NOSTRILS
 
 
 def observation_dim(morph: CreatureMorphology) -> int:
-    return 3 * morph.num_legs + 3 + _NOSTRILS + 2 + 3 + 3 + 1
+    return 3 * morph.num_actuators + 3 + _NOSTRILS + 2 + 3 + 3 + 1
 
 
 def make_observation_space(morph: CreatureMorphology) -> spaces.Box:
@@ -39,7 +39,8 @@ def make_observation_space(morph: CreatureMorphology) -> spaces.Box:
 
 
 def make_action_space(morph: CreatureMorphology) -> spaces.Box:
-    return spaces.Box(low=-1.0, high=1.0, shape=(morph.num_legs,), dtype=np.float32)
+    return spaces.Box(low=-1.0, high=1.0, shape=(morph.num_actuators,),
+                      dtype=np.float32)
 
 
 def _world_diag(world: World) -> float:
@@ -52,6 +53,29 @@ def _rotate_to_body(dx: float, dy: float, angle: float) -> tuple[float, float]:
     return dx * ca - dy * sa, dx * sa + dy * ca
 
 
+def _emit_bearing(obs, cx, cy, ang, diag, point) -> None:
+    """Append (sin bearing, cos bearing, distance) for a world point, or far/0."""
+    if point is None:
+        obs.extend([0.0, 0.0, 1.0])
+        return
+    dx, dy = point[0] - cx, point[1] - cy
+    xb, yb = _rotate_to_body(dx, dy, ang)
+    bearing = math.atan2(yb, xb)
+    obs.append(math.sin(bearing))
+    obs.append(math.cos(bearing))
+    obs.append(float(np.clip(math.hypot(dx, dy) / diag, 0.0, 1.0)))
+
+
+def _target_and_threat(world: World, creature: Creature):
+    cx, cy = creature.position
+    if creature.role == "predator":
+        prey = world.nearest_creature(cx, cy, role="forager", exclude=creature)
+        return (prey.position if prey else None), None
+    food = world.nearest_food(cx, cy)
+    pred = world.nearest_creature(cx, cy, role="predator", exclude=creature)
+    return (food.position if food else None), (pred.position if pred else None)
+
+
 def observe(world: World, creature: Creature) -> np.ndarray:
     """Assemble the normalised observation vector for ``creature``."""
     obs: list[float] = []
@@ -59,8 +83,8 @@ def observe(world: World, creature: Creature) -> np.ndarray:
     ang = creature.angle
     diag = _world_diag(world)
 
-    # Per-leg proprioception.
-    for rel_angle, ang_vel, _neutral in creature.leg_states():
+    # Per-joint proprioception.
+    for rel_angle, ang_vel in creature.actuator_states():
         obs.append(math.sin(rel_angle))
         obs.append(math.cos(rel_angle))
         obs.append(float(np.clip(ang_vel / config.LEG_MAX_RATE, -1.0, 1.0)))
@@ -87,21 +111,12 @@ def observe(world: World, creature: Creature) -> np.ndarray:
     obs.append(float(np.tanh(gxb)))
     obs.append(float(np.tanh(gyb)))
 
-    # Nearest food bearing + distance (body frame).
-    food = world.nearest_food(cx, cy)
-    if food is not None:
-        dx, dy = food.x - cx, food.y - cy
-        fxb, fyb = _rotate_to_body(dx, dy, ang)
-        bearing = math.atan2(fyb, fxb)
-        dist = math.hypot(dx, dy)
-        obs.append(math.sin(bearing))
-        obs.append(math.cos(bearing))
-        obs.append(float(np.clip(dist / diag, 0.0, 1.0)))
-    else:
-        obs.extend([0.0, 0.0, 1.0])
-
-    # Nearest enemy bearing + distance (Phase 1: none -> zeros, far).
-    obs.extend([0.0, 0.0, 1.0])
+    # Target + threat depend on the creature's role:
+    #   forager:  target = nearest food,    threat = nearest predator
+    #   predator: target = nearest forager, threat = none
+    target, threat = _target_and_threat(world, creature)
+    _emit_bearing(obs, cx, cy, ang, diag, target)
+    _emit_bearing(obs, cx, cy, ang, diag, threat)
 
     # Energy.
     obs.append(float(np.clip(creature.energy, 0.0, 1.0)))

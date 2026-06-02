@@ -44,7 +44,8 @@ class LiveTrainingScreen(Screen):
         self.ctrl = SharedControl()
         self.ctrl.set_speed(30.0)
         self.live_env = LiveCreatureEnv(self.world, self.ctrl,
-                                        morph=species.morphology)
+                                        morph=species.morphology,
+                                        role=getattr(species, "role", "forager"))
         self.trainer = Trainer()
 
         self.camera = Camera(_VIEW_W, config.WINDOW_HEIGHT)

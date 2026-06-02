@@ -130,7 +130,9 @@ class SandboxScreen(Screen):
             self.status = f"Could not load brain: {exc}"
             return
         species = registry.load(name)
-        creature = self.world.add_creature(species.morphology, (wx, wy))
+        creature = self.world.add_creature(
+            species.morphology, (wx, wy),
+            role=getattr(species, "role", "forager"))
         self._creature_models.append((creature, model))
         self.status = f"Spawned a {name}."
 

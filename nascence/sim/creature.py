@@ -16,8 +16,10 @@ class Creature:
         morph: CreatureMorphology,
         position: tuple[float, float],
         angle: float = 0.0,
+        role: str = "forager",
     ) -> None:
         self.morph = morph
+        self.role = role  # "forager" | "predator"
         self.body: BuiltBody = build_body(morph, position, angle)
         self.energy = config.START_ENERGY
         self.alive = True
@@ -36,9 +38,14 @@ class Creature:
     def angle(self) -> float:
         return self.body.hub.angle
 
+    def _motors(self):
+        for leg in self.body.legs:
+            for j, motor in enumerate(leg.motors):
+                yield leg, j, motor
+
     # -- placement ----------------------------------------------------------
     def teleport(self, x: float, y: float) -> None:
-        """Move the whole creature (hub + legs) so it keeps its shape."""
+        """Move the whole creature (hub + legs + jelly ring) keeping its shape."""
         hub = self.body.hub
         dx, dy = x - hub.position.x, y - hub.position.y
         for b in self.body.all_bodies():
@@ -48,28 +55,27 @@ class Creature:
 
     # -- control ------------------------------------------------------------
     def apply_action(self, action: np.ndarray) -> None:
-        """Set each leg motor's target rate from a [-1, 1] action vector."""
-        for i, leg in enumerate(self.body.legs):
-            a = float(np.clip(action[i], -1.0, 1.0))
-            leg.motor.rate = a * self.morph.leg_max_rate
+        """Set every joint motor's target rate from a [-1, 1] action vector."""
+        for k, (_leg, _j, motor) in enumerate(self._motors()):
+            if k >= len(action):
+                break
+            a = float(np.clip(action[k], -1.0, 1.0))
+            motor.rate = a * self.morph.leg_max_rate
 
     # -- proprioception -----------------------------------------------------
-    def leg_states(self) -> list[tuple[float, float, float]]:
-        """Per-leg (relative_angle, sin, cos, angular_velocity) proprioception.
-
-        Returns a list of (rel_angle, ang_vel) but encoded for the observation
-        builder; kept simple here and expanded in rl/spaces.py.
-        """
+    def actuator_states(self) -> list[tuple[float, float]]:
+        """Per-joint (relative_angle, relative_angular_velocity)."""
         states = []
-        hub = self.body.hub
-        for leg in self.body.legs:
-            rel_angle = leg.segment.angle - hub.angle - leg.neutral_angle
-            ang_vel = leg.segment.angular_velocity - hub.angular_velocity
-            states.append((rel_angle, ang_vel, leg.neutral_angle))
+        for leg, j, _motor in self._motors():
+            seg = leg.segments[j]
+            parent = leg.parents[j]
+            neutral = leg.neutral_angle if j == 0 else 0.0
+            rel_angle = seg.angle - parent.angle - neutral
+            rel_vel = seg.angular_velocity - parent.angular_velocity
+            states.append((rel_angle, rel_vel))
         return states
 
     def body_velocity_local(self) -> tuple[float, float, float]:
-        """Body-frame (vx, vy, angular_velocity)."""
         hub = self.body.hub
         v = hub.velocity
         a = -hub.angle

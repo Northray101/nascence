@@ -81,29 +81,48 @@ def _draw_walls(surface, world: World, camera: Camera) -> None:
     pygame.draw.rect(surface, COL_WALL, rect, width=2)
 
 
+COL_PRED = (255, 120, 110)
+COL_PRED_EDGE = (255, 200, 195)
+COL_DEAD = (90, 95, 110)
+COL_JELLY = (120, 180, 255, 90)
+
+
 def _draw_creature(surface, creature, camera: Camera) -> None:
-    # Legs first (so the body sits on top).
-    for leg in creature.body.legs:
-        verts = leg.shape.get_vertices()
-        pts = []
-        for v in verts:
-            wx, wy = leg.segment.local_to_world(v)
-            pts.append(camera.world_to_screen(wx, wy))
+    import math
+
+    predator = getattr(creature, "role", "forager") == "predator"
+    alive = getattr(creature, "alive", True)
+    if not alive:
+        body_col, edge_col, leg_col = COL_DEAD, COL_DEAD, COL_DEAD
+    elif predator:
+        body_col, edge_col, leg_col = COL_PRED, COL_PRED_EDGE, (200, 90, 80)
+    else:
+        body_col, edge_col, leg_col = COL_BODY, COL_BODY_EDGE, COL_LEG
+
+    # Jelly ring (drawn behind everything as a soft blob outline).
+    if creature.body.ring_nodes:
+        pts = [camera.world_to_screen(b.position.x, b.position.y)
+               for b in creature.body.ring_nodes]
         if len(pts) >= 3:
-            pygame.draw.polygon(surface, COL_LEG, pts)
+            pygame.draw.polygon(surface, body_col, pts)
+            pygame.draw.polygon(surface, edge_col, pts, width=2)
+
+    # Legs (each segment is a box body).
+    for leg in creature.body.legs:
+        for seg, shape in zip(leg.segments, leg.shapes):
+            pts = [camera.world_to_screen(*seg.local_to_world(v))
+                   for v in shape.get_vertices()]
+            if len(pts) >= 3:
+                pygame.draw.polygon(surface, leg_col, pts)
 
     # Body hub.
     cx, cy = creature.position
     sx, sy = camera.world_to_screen(cx, cy)
     r = max(4, int(creature.morph.body_radius * camera.zoom))
-    pygame.draw.circle(surface, COL_BODY, (sx, sy), r)
-    pygame.draw.circle(surface, COL_BODY_EDGE, (sx, sy), r, width=2)
-
-    # Heading indicator.
-    import math
+    pygame.draw.circle(surface, body_col, (sx, sy), r)
+    pygame.draw.circle(surface, edge_col, (sx, sy), r, width=2)
 
     hx = cx + math.cos(creature.angle) * creature.morph.body_radius
     hy = cy + math.sin(creature.angle) * creature.morph.body_radius
-    pygame.draw.line(
-        surface, COL_BODY_EDGE, (sx, sy), camera.world_to_screen(hx, hy), 2
-    )
+    pygame.draw.line(surface, edge_col, (sx, sy),
+                     camera.world_to_screen(hx, hy), 2)

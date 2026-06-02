@@ -6,6 +6,7 @@ import pygame
 import pygame_gui
 from pygame_gui.elements import (
     UIButton,
+    UIDropDownMenu,
     UIHorizontalSlider,
     UILabel,
     UISelectionList,
@@ -24,7 +25,7 @@ class _NewSpeciesDialog(UIWindow):
 
     def __init__(self, manager) -> None:
         super().__init__(
-            rect=pygame.Rect((0, 0), (380, 280)),
+            rect=pygame.Rect((0, 0), (380, 470)),
             manager=manager,
             window_display_title="New species",
             object_id="#new_species",
@@ -32,49 +33,65 @@ class _NewSpeciesDialog(UIWindow):
         self.set_blocking(True)
         w = 340
 
-        UILabel(
-            relative_rect=pygame.Rect((10, 10), (w, 26)),
-            text="Name your bacteria:",
-            manager=manager,
-            container=self,
-        )
-        self.name_entry = UITextEntryLine(
-            relative_rect=pygame.Rect((10, 40), (w, 36)),
-            manager=manager,
-            container=self,
-        )
+        UILabel(pygame.Rect((10, 8), (w, 24)), "Name your bacteria:",
+                manager, container=self)
+        self.name_entry = UITextEntryLine(pygame.Rect((10, 34), (w, 34)),
+                                          manager, container=self)
         self.name_entry.set_text("Wiggler")
 
-        self.legs_label = UILabel(
-            relative_rect=pygame.Rect((10, 90), (w, 26)),
-            text="Legs: 3",
-            manager=manager,
-            container=self,
-        )
-        self.legs_slider = UIHorizontalSlider(
-            relative_rect=pygame.Rect((10, 118), (w, 28)),
-            start_value=3,
-            value_range=(2, 6),
-            manager=manager,
-            container=self,
-        )
+        UILabel(pygame.Rect((10, 76), (w, 22)), "Role:", manager, container=self)
+        self.role_menu = UIDropDownMenu(
+            ["forager (eats food)", "predator (hunts prey)"],
+            "forager (eats food)", pygame.Rect((10, 100), (w, 32)),
+            manager, container=self)
 
-        self.create_btn = UIButton(
-            relative_rect=pygame.Rect((10, 200), (160, 40)),
-            text="Create",
-            manager=manager,
-            container=self,
-        )
-        self.cancel_btn = UIButton(
-            relative_rect=pygame.Rect((190, 200), (160, 40)),
-            text="Cancel",
-            manager=manager,
-            container=self,
-        )
+        UILabel(pygame.Rect((10, 140), (w, 22)), "Body:", manager, container=self)
+        self.body_menu = UIDropDownMenu(
+            ["rigid (firm)", "jelly (squishy)"], "rigid (firm)",
+            pygame.Rect((10, 164), (w, 32)), manager, container=self)
+
+        self.legs_label = UILabel(pygame.Rect((10, 204), (w, 24)), "Legs: 3",
+                                  manager, container=self)
+        self.legs_slider = UIHorizontalSlider(
+            pygame.Rect((10, 230), (w, 26)), start_value=3, value_range=(2, 6),
+            manager=manager, container=self)
+
+        self.seg_label = UILabel(pygame.Rect((10, 264), (w, 24)),
+                                 "Leg joints: 1 (simple)", manager, container=self)
+        self.seg_slider = UIHorizontalSlider(
+            pygame.Rect((10, 290), (w, 26)), start_value=1, value_range=(1, 2),
+            manager=manager, container=self)
+
+        self.firm_label = UILabel(pygame.Rect((10, 324), (w, 24)),
+                                  "Jelly wobble: firm", manager, container=self)
+        self.firm_slider = UIHorizontalSlider(
+            pygame.Rect((10, 350), (w, 26)), start_value=100, value_range=(20, 100),
+            manager=manager, container=self)
+
+        self.create_btn = UIButton(pygame.Rect((10, 390), (160, 38)), "Create",
+                                   manager, container=self)
+        self.cancel_btn = UIButton(pygame.Rect((190, 390), (160, 38)), "Cancel",
+                                   manager, container=self)
 
     @property
     def leg_count(self) -> int:
         return int(round(self.legs_slider.get_current_value()))
+
+    @property
+    def leg_segments(self) -> int:
+        return int(round(self.seg_slider.get_current_value()))
+
+    @property
+    def role(self) -> str:
+        return "predator" if "predator" in str(self.role_menu.selected_option) else "forager"
+
+    @property
+    def body_type(self) -> str:
+        return "jelly" if "jelly" in str(self.body_menu.selected_option) else "rigid"
+
+    @property
+    def firmness(self) -> float:
+        return float(self.firm_slider.get_current_value()) / 100.0
 
 
 class SpeciesManager(Screen):
@@ -164,8 +181,18 @@ class SpeciesManager(Screen):
                 self._close_dialog()
 
         elif event.type == pygame_gui.UI_HORIZONTAL_SLIDER_MOVED:
-            if self.dialog is not None and event.ui_element == self.dialog.legs_slider:
-                self.dialog.legs_label.set_text(f"Legs: {self.dialog.leg_count}")
+            d = self.dialog
+            if d is None:
+                return
+            if event.ui_element == d.legs_slider:
+                d.legs_label.set_text(f"Legs: {d.leg_count}")
+            elif event.ui_element == d.seg_slider:
+                kind = "1 (simple)" if d.leg_segments == 1 else "2 (hip + knee)"
+                d.seg_label.set_text(f"Leg joints: {kind}")
+            elif event.ui_element == d.firm_slider:
+                f = d.firmness
+                word = "firm" if f > 0.7 else ("wobbly" if f > 0.4 else "very wobbly")
+                d.firm_label.set_text(f"Jelly wobble: {word}")
 
         elif event.type == pygame_gui.UI_WINDOW_CLOSE:
             if self.dialog is not None and event.ui_element == self.dialog:
@@ -174,12 +201,18 @@ class SpeciesManager(Screen):
     # -- actions ------------------------------------------------------------
     def _create_from_dialog(self) -> None:
         assert self.dialog is not None
-        name = self.dialog.name_entry.get_text().strip() or "Wiggler"
+        d = self.dialog
+        name = d.name_entry.get_text().strip() or "Wiggler"
         if registry.exists(name):
             self.hint.set_text("Name already exists.")
             return
-        morph = CreatureMorphology(num_legs=self.dialog.leg_count)
-        registry.create(name, morph)
+        morph = CreatureMorphology(
+            num_legs=d.leg_count,
+            leg_segments=d.leg_segments,
+            body_type=d.body_type,
+            firmness=d.firmness,
+        )
+        registry.create(name, morph, role=d.role)
         self._close_dialog()
         self._refresh()
         self.hint.set_text(f"Created '{name}'.\nSelect it and Train.")

@@ -18,6 +18,22 @@ class RewardWeights:
     time_cost: float = 0.005   # tiny per-step penalty to encourage promptness
 
 
+def predator_reward(
+    prev_dist: float,
+    dist: float,
+    caught: bool,
+    action_magnitude: float,
+    weights: RewardWeights,
+) -> float:
+    """Reward for a prey-hunting creature: close on the prey, bonus on a catch."""
+    r = weights.progress * (prev_dist - dist)
+    if caught:
+        r += weights.eat
+    r -= weights.energy_cost * action_magnitude
+    r -= weights.time_cost
+    return r
+
+
 def forager_reward(
     prev_dist: float,
     dist: float,

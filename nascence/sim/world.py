@@ -34,6 +34,7 @@ class World:
 
         self.creatures: list[Creature] = []
         self.food: list[Food] = []
+        self.catches: list[tuple[Creature, Creature]] = []
         # User-placed walls, kept as endpoint pairs for rendering.
         self.user_walls: list[tuple[float, float, float, float]] = []
         self.chem = ChemicalField(width, height)
@@ -61,11 +62,11 @@ class World:
         morph: CreatureMorphology,
         position: tuple[float, float],
         angle: float = 0.0,
+        role: str = "forager",
     ) -> Creature:
-        creature = Creature(morph, position, angle)
-        self.space.add(creature.hub, creature.body.hub_shape)
-        for leg in creature.body.legs:
-            self.space.add(leg.segment, leg.shape)
+        creature = Creature(morph, position, angle, role=role)
+        self.space.add(*creature.body.all_bodies())
+        self.space.add(*creature.body.all_shapes())
         self.space.add(*creature.body.constraints)
         self.creatures.append(creature)
         return creature
@@ -100,6 +101,18 @@ class World:
     def clear_food(self) -> None:
         self.food.clear()
 
+    def nearest_creature(
+        self, x: float, y: float, role: str, exclude: Creature | None = None
+    ) -> Creature | None:
+        best, best_d2 = None, float("inf")
+        for c in self.creatures:
+            if c is exclude or not c.alive or c.role != role:
+                continue
+            d2 = (c.position[0] - x) ** 2 + (c.position[1] - y) ** 2
+            if d2 < best_d2:
+                best_d2, best = d2, c
+        return best
+
     def nearest_food(self, x: float, y: float) -> Food | None:
         best: Food | None = None
         best_d2 = float("inf")
@@ -124,8 +137,8 @@ class World:
                 (-config.BODY_DRAG * hv.x, -config.BODY_DRAG * hv.y),
                 hub.position,
             )
-            for leg in creature.body.legs:
-                seg = leg.segment
+            segs = [s for leg in creature.body.legs for s in leg.segments]
+            for seg in segs:
                 v = seg.velocity
                 ca, sa = math.cos(seg.angle), math.sin(seg.angle)
                 # Decompose velocity into along-leg (local x) and perpendicular.
@@ -166,4 +179,18 @@ class World:
                     f.eaten = True
                     creature.energy = min(1.0, creature.energy + f.amount)
                     eats.append((creature, f))
+
+        # Predators catching foragers.
+        self.catches: list[tuple[Creature, Creature]] = []
+        for pred in self.creatures:
+            if not pred.alive or pred.role != "predator":
+                continue
+            px, py = pred.position
+            prey = self.nearest_creature(px, py, role="forager")
+            if prey is not None and math.hypot(
+                prey.position[0] - px, prey.position[1] - py
+            ) <= config.CATCH_RADIUS:
+                prey.alive = False
+                pred.energy = min(1.0, pred.energy + config.ENERGY_PER_FOOD)
+                self.catches.append((pred, prey))
         return eats

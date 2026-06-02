@@ -69,6 +69,7 @@ NUM_NOSTRILS = 4           # smell sample points around the body
 START_ENERGY = 1.0
 ENERGY_PER_FOOD = 0.6
 FOOD_EAT_RADIUS = 18.0     # body-to-food distance that counts as "eaten"
+CATCH_RADIUS = 30.0        # predator-to-prey distance that counts as a "catch"
 
 # ---------------------------------------------------------------------------
 # Training
