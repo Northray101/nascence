@@ -53,17 +53,27 @@ def _rotate_to_body(dx: float, dy: float, angle: float) -> tuple[float, float]:
     return dx * ca - dy * sa, dx * sa + dy * ca
 
 
-def _emit_bearing(obs, cx, cy, ang, diag, point) -> None:
-    """Append (sin bearing, cos bearing, distance) for a world point, or far/0."""
+def _emit_vision(obs, cx, cy, ang, point) -> None:
+    """Append (sin bearing, cos bearing, distance) for a point *only if* it falls
+    inside the creature's forward vision cone and within range; otherwise emit
+    "nothing seen" (0, 0, 1). Vision is invisible but finite: the creature must
+    face roughly toward a target, and be close enough, to perceive it."""
     if point is None:
         obs.extend([0.0, 0.0, 1.0])
         return
     dx, dy = point[0] - cx, point[1] - cy
+    dist = math.hypot(dx, dy)
+    if dist > config.VISION_RANGE:
+        obs.extend([0.0, 0.0, 1.0])
+        return
     xb, yb = _rotate_to_body(dx, dy, ang)
-    bearing = math.atan2(yb, xb)
+    bearing = math.atan2(yb, xb)  # 0 = straight ahead
+    if abs(bearing) > config.VISION_HALF_ANGLE:
+        obs.extend([0.0, 0.0, 1.0])
+        return
     obs.append(math.sin(bearing))
     obs.append(math.cos(bearing))
-    obs.append(float(np.clip(math.hypot(dx, dy) / diag, 0.0, 1.0)))
+    obs.append(float(np.clip(dist / config.VISION_RANGE, 0.0, 1.0)))
 
 
 def _target_and_threat(world: World, creature: Creature):
@@ -115,8 +125,8 @@ def observe(world: World, creature: Creature) -> np.ndarray:
     #   forager:  target = nearest food,    threat = nearest predator
     #   predator: target = nearest forager, threat = none
     target, threat = _target_and_threat(world, creature)
-    _emit_bearing(obs, cx, cy, ang, diag, target)
-    _emit_bearing(obs, cx, cy, ang, diag, threat)
+    _emit_vision(obs, cx, cy, ang, target)
+    _emit_vision(obs, cx, cy, ang, threat)
 
     # Energy.
     obs.append(float(np.clip(creature.energy, 0.0, 1.0)))

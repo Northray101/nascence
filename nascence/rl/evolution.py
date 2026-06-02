@@ -43,11 +43,19 @@ POP_SIZE = 12          # creatures alive at once
 SURVIVORS = 3          # how many of the best carry over each generation
 GEN_STEPS = 400        # world steps per generation before culling
 MUTATION = 0.18        # std of weight noise when breeding a child
-SPAWN_RADIUS = 260.0   # how far new creatures appear from the world centre
-FOOD_TARGET = 4        # foragers: keep at least this many food around
+FOOD_TARGET = 4        # foragers: how many food in the level
 PREY_COUNT = 3         # predators: this many scripted prey to hunt
 PREY_FLEE_SPEED = 2.6
 TREAT_GAIN = 4.0       # how strongly a Treat/Scold nudges the leader's fitness
+
+# Difficulty ramp. Everyone starts at the same place each generation; the
+# *environment* is what changes — random, and harder at higher levels.
+BASE_TARGET_DIST = 150.0    # how far the goal sits at level 1
+DIST_PER_LEVEL = 70.0       # extra distance per level
+OBSTACLES_PER_LEVEL = 1     # extra random walls per level
+MAX_OBSTACLES = 8
+ADVANCE_FITNESS = 12.0      # a generation this good "solves" the level
+AUTO_WINS = 2               # solve it this many gens in a row -> auto level up
 
 
 @dataclass
@@ -81,6 +89,15 @@ class EvolutionTrainer:
         self.total_steps = 0
         self.best_fitness = float("-inf")
         self.best_policy: MLPPolicy | None = None
+
+        # Everyone is born here, facing the same way, every generation.
+        self.start_pos = self._centre()
+        self.start_angle = 0.0
+        # Difficulty.
+        self.level = 1
+        self.auto_advance = True
+        self._win_streak = 0
+        self._gen_best = 0.0
 
     @property
     def running(self) -> bool:
@@ -122,12 +139,89 @@ class EvolutionTrainer:
         return x, y
 
     def _spawn_individual(self, policy: MLPPolicy) -> _Individual:
-        x, y = self._random_point(SPAWN_RADIUS)
-        ang = self._rng.uniform(0, 2 * math.pi)
-        creature = self.world.add_creature(self.morph, (x, y), ang, role=self.role)
+        # Always born at the shared start, facing the same way. Brains differ;
+        # the starting conditions do not.
+        creature = self.world.add_creature(
+            self.morph, self.start_pos, self.start_angle, role=self.role)
         ind = _Individual(creature=creature, policy=policy)
         ind.prev_dist = self._target_dist(creature)
         return ind
+
+    # -- difficulty ---------------------------------------------------------
+    def _target_distance(self) -> float:
+        """How far goals sit from the start at the current level."""
+        d = BASE_TARGET_DIST + (self.level - 1) * DIST_PER_LEVEL
+        return min(d, 0.42 * min(self.world.width, self.world.height))
+
+    def _goal_point(self) -> tuple[float, float]:
+        """A random point at roughly the level's target distance from start."""
+        cx, cy = self.start_pos
+        ang = self._rng.uniform(0, 2 * math.pi)
+        d = self._target_distance() * self._rng.uniform(0.8, 1.15)
+        x = float(np.clip(cx + math.cos(ang) * d, 50, self.world.width - 50))
+        y = float(np.clip(cy + math.sin(ang) * d, 50, self.world.height - 50))
+        return x, y
+
+    def _build_environment(self) -> None:
+        """Lay out a fresh, random environment scaled to the current level:
+        goals at the level's distance plus some random obstacle walls."""
+        self.world.clear_food()
+        self.world.clear_walls()
+        # Goals.
+        if self.role == "predator":
+            for p in list(self.prey):
+                self.world.remove_creature(p)
+            self.prey = []
+            for _ in range(PREY_COUNT):
+                self.prey.append(self.world.add_creature(
+                    CreatureMorphology(), self._goal_point(), role="forager"))
+        else:
+            for _ in range(FOOD_TARGET):
+                self.world.add_food(*self._goal_point())
+        # Random obstacles (kept clear of the start so nobody spawns inside one).
+        n_obs = min((self.level - 1) * OBSTACLES_PER_LEVEL, MAX_OBSTACLES)
+        sx, sy = self.start_pos
+        for _ in range(n_obs):
+            for _try in range(8):
+                x1 = float(self._rng.uniform(80, self.world.width - 80))
+                y1 = float(self._rng.uniform(80, self.world.height - 80))
+                if math.hypot(x1 - sx, y1 - sy) < 110:
+                    continue
+                ang = self._rng.uniform(0, 2 * math.pi)
+                length = float(self._rng.uniform(70, 150))
+                x2 = float(np.clip(x1 + math.cos(ang) * length, 40,
+                                   self.world.width - 40))
+                y2 = float(np.clip(y1 + math.sin(ang) * length, 40,
+                                   self.world.height - 40))
+                self.world.add_wall(x1, y1, x2, y2)
+                break
+
+    def _reset_positions(self) -> None:
+        """Send every creature back to the shared start with fresh fitness."""
+        for ind in self.population:
+            ind.creature.alive = True
+            ind.creature.energy = config.START_ENERGY
+            ind.creature.teleport(*self.start_pos)
+            ind.fitness = 0.0
+            ind.prev_dist = self._target_dist(ind.creature)
+
+    def _advance_level(self) -> None:
+        self.level += 1
+        self._win_streak = 0
+        self._build_environment()
+        self._reset_positions()
+
+    def _maybe_auto_advance(self) -> None:
+        """Level up automatically once the population reliably solves a level."""
+        if not self.auto_advance:
+            self._win_streak = 0
+            return
+        if self._gen_best >= ADVANCE_FITNESS:
+            self._win_streak += 1
+            if self._win_streak >= AUTO_WINS:
+                self._advance_level()
+        else:
+            self._win_streak = 0
 
     def _target_dist(self, creature) -> float:
         cx, cy = creature.position
@@ -142,19 +236,17 @@ class EvolutionTrainer:
         return math.hypot(pt[0] - cx, pt[1] - cy)
 
     def _ensure_targets(self) -> None:
-        """Keep something to chase: food for foragers, prey for predators."""
+        """Top up goals eaten/caught mid-generation at the level's distance."""
         if self.role == "predator":
             self.prey = [p for p in self.prey if p.alive]
             while len(self.prey) < PREY_COUNT:
-                x, y = self._random_point(SPAWN_RADIUS * 1.4)
                 self.prey.append(self.world.add_creature(
-                    CreatureMorphology(), (x, y), role="forager"))
+                    CreatureMorphology(), self._goal_point(), role="forager"))
         else:
             live = [f for f in self.world.food if not f.eaten]
             self.world.food = live
             while len(self.world.food) < FOOD_TARGET:
-                x, y = self._random_point(SPAWN_RADIUS * 1.3)
-                self.world.add_food(x, y)
+                self.world.add_food(*self._goal_point())
 
     def _drift_prey(self) -> None:
         """Scripted prey wander and flee the nearest predator a little."""
@@ -178,7 +270,7 @@ class EvolutionTrainer:
     def _run(self) -> None:
         try:
             with self.ctrl.lock:
-                self._ensure_targets()
+                self._build_environment()
                 for _ in range(POP_SIZE):
                     self.population.append(self._spawn_individual(
                         MLPPolicy(self.obs_dim, self.act_dim, rng=self._rng)))
@@ -196,6 +288,10 @@ class EvolutionTrainer:
                 if step_in_gen >= GEN_STEPS:
                     with self.ctrl.lock:
                         self._select_and_breed()
+                        # New generation: same start, fresh random environment.
+                        self._build_environment()
+                        self._reset_positions()
+                        self._maybe_auto_advance()
                     step_in_gen = 0
                     self.generation += 1
                     self._emit(timesteps=self.total_steps, total=0,
@@ -245,7 +341,7 @@ class EvolutionTrainer:
         if self.world.catches:
             for _pred, victim in self.world.catches:
                 victim.alive = True
-                victim.teleport(*self._random_point(SPAWN_RADIUS * 1.4))
+                victim.teleport(*self._goal_point())
 
         # 6. manual Treat / Scold lands on the current leader.
         bump = self.ctrl.take_reward()
@@ -266,14 +362,19 @@ class EvolutionTrainer:
             elif cmd.kind == "drag" and leader is not None:
                 leader.creature.teleport(cmd.x, cmd.y)
             elif cmd.kind == "reset_pose" and leader is not None:
-                leader.creature.teleport(*self._centre())
+                leader.creature.teleport(*self.start_pos)
             elif cmd.kind == "wall":
                 self.world.add_wall(cmd.x, cmd.y, cmd.x2, cmd.y2)
+            elif cmd.kind == "advance_level":
+                self._advance_level()
+            elif cmd.kind == "auto_advance":
+                self.auto_advance = bool(cmd.x)
 
     def _select_and_breed(self) -> None:
         """Rank the population; keep the best, cull and replace the rest."""
         self.population.sort(key=lambda i: i.fitness, reverse=True)
         survivors = self.population[:SURVIVORS]
+        self._gen_best = survivors[0].fitness if survivors else 0.0
         if survivors and survivors[0].fitness > self.best_fitness:
             self.best_fitness = survivors[0].fitness
             self.best_policy = survivors[0].policy.clone()

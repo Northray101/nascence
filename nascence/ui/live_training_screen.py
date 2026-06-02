@@ -87,21 +87,29 @@ class LiveTrainingScreen(Screen):
         self.btn_scold = UIButton(pygame.Rect((px + 155, 188), (150, 44)),
                                   "Scold  (–)", self.manager)
 
-        self.speed_label = UILabel(pygame.Rect((px, 248), (w, 24)),
+        UILabel(relative_rect=pygame.Rect((px, 240), (w, 24)),
+                text="Difficulty (random levels):", manager=self.manager)
+        self.btn_level = UIButton(pygame.Rect((px, 266), (160, 38)),
+                                  "Advance level ▶", self.manager)
+        self.btn_auto = UIButton(pygame.Rect((px + 165, 266), (143, 38)),
+                                 "Auto: ON", self.manager)
+        self.auto_advance = True
+
+        self.speed_label = UILabel(pygame.Rect((px, 314), (w, 24)),
                                    "Speed: 60 steps/s", self.manager)
         self.speed_slider = UIHorizontalSlider(
-            pygame.Rect((px, 274), (w, 28)), start_value=60,
-            value_range=(2, 600), manager=self.manager)
-        self.btn_pause = UIButton(pygame.Rect((px, 308), (w, 38)),
+            pygame.Rect((px, 340), (w, 26)), start_value=60,
+            value_range=(2, 5000), manager=self.manager)
+        self.btn_pause = UIButton(pygame.Rect((px, 372), (w, 34)),
                                   "Pause", self.manager)
 
-        self.btn_save = UIButton(pygame.Rect((px, 360), (w, 44)),
+        self.btn_save = UIButton(pygame.Rect((px, 414), (w, 40)),
                                  "Save best & stop", self.manager)
         self.btn_back = UIButton(
-            pygame.Rect((px, config.WINDOW_HEIGHT - 56), (w, 40)),
+            pygame.Rect((px, config.WINDOW_HEIGHT - 52), (w, 38)),
             "Back (save best)", self.manager)
 
-        self.chart_rect = pygame.Rect(px, 420, w, 200)
+        self.chart_rect = pygame.Rect(px, 464, w, 150)
 
     def on_enter(self) -> None:
         self.trainer.start(self.species, _LIVE_TIMESTEPS)
@@ -144,6 +152,13 @@ class LiveTrainingScreen(Screen):
             self.ctrl.add_reward(_TREAT); self.status = "Treat! (+reward)"
         elif el == self.btn_scold:
             self.ctrl.add_reward(-_TREAT); self.status = "Scold! (–reward)"
+        elif el == self.btn_level:
+            self.ctrl.push(Command("advance_level"))
+            self.status = "Advancing to a harder level…"
+        elif el == self.btn_auto:
+            self.auto_advance = not self.auto_advance
+            self.ctrl.push(Command("auto_advance", x=1.0 if self.auto_advance else 0.0))
+            self.btn_auto.set_text("Auto: ON" if self.auto_advance else "Auto: OFF")
         elif el == self.btn_pause:
             self.paused = not self.paused
             self.ctrl.set_paused(self.paused)
@@ -177,8 +192,8 @@ class LiveTrainingScreen(Screen):
                 self.reward_history.append(p.mean_reward)
             if not p.done and self.trainer.running:
                 self.status = (
+                    f"Level {self.trainer.level}   "
                     f"Gen {self.trainer.generation}   "
-                    f"population: {len(self.trainer.population)}   "
                     f"best score: {p.mean_reward:.1f}"
                 )
             if p.done:

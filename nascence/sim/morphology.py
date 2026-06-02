@@ -40,6 +40,17 @@ class CreatureMorphology:
     def num_actuators(self) -> int:
         return self.num_legs * self.leg_segments
 
+    @property
+    def elongation(self) -> float:
+        """How stretched the body is along its heading (1.0 = round)."""
+        extra = max(0, self.num_legs - 2)
+        return 1.0 + extra * config.BODY_ELONGATION_PER_LEG
+
+    @property
+    def body_half_length(self) -> float:
+        """Half the body length along the heading axis (>= body_radius)."""
+        return self.body_radius * self.elongation
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -102,12 +113,23 @@ def build_body(
 ) -> BuiltBody:
     px, py = position
 
+    # The body stretches along its heading as legs are added: a round disc for
+    # few legs, an elongated capsule/box for many (centipede-like).
+    half_len = morph.body_half_length   # along local x (heading)
+    half_wid = morph.body_radius        # across
     hub_mass = 1.0
-    hub_moment = pymunk.moment_for_circle(hub_mass, 0, morph.body_radius)
-    hub = pymunk.Body(hub_mass, hub_moment)
-    hub.position = (px, py)
-    hub.angle = angle
-    hub_shape = pymunk.Circle(hub, morph.body_radius)
+    if morph.elongation > 1.001:
+        hub_moment = pymunk.moment_for_box(hub_mass, (2 * half_len, 2 * half_wid))
+        hub = pymunk.Body(hub_mass, hub_moment)
+        hub.position = (px, py)
+        hub.angle = angle
+        hub_shape = pymunk.Poly.create_box(hub, (2 * half_len, 2 * half_wid))
+    else:
+        hub_moment = pymunk.moment_for_circle(hub_mass, 0, morph.body_radius)
+        hub = pymunk.Body(hub_mass, hub_moment)
+        hub.position = (px, py)
+        hub.angle = angle
+        hub_shape = pymunk.Circle(hub, morph.body_radius)
     hub_shape.friction = 0.6
     hub_shape.collision_type = CT_BODY
 
@@ -122,9 +144,11 @@ def build_body(
     seg2_scale = 0.8  # the knee segment is a bit shorter
     for i in range(morph.num_legs):
         neutral = (2.0 * math.pi * i) / morph.num_legs
+        # Anchor on the body's ellipse (elongated along the heading), so on a
+        # stretched body the legs line up along its sides.
         anchor_world = hub.local_to_world(
-            (math.cos(neutral) * morph.body_radius,
-             math.sin(neutral) * morph.body_radius)
+            (math.cos(neutral) * half_len,
+             math.sin(neutral) * half_wid)
         )
         outward = (math.cos(neutral + angle), math.sin(neutral + angle))
 

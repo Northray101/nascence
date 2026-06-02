@@ -52,6 +52,18 @@ DEFAULT_LEG_WIDTH = 6.0
 LEG_MAX_RATE = 6.0
 # How far a leg may swing from its neutral angle (radians).
 LEG_SWING_LIMIT = 0.9
+# More legs -> a more elongated (longer) body. Each leg past the second adds
+# this fraction to the body's length along its heading.
+BODY_ELONGATION_PER_LEG = 0.18
+
+# ---------------------------------------------------------------------------
+# Vision (a finite, invisible cone in front of the creature)
+# ---------------------------------------------------------------------------
+import math as _math
+# How far the creature can see (sim units). Targets beyond this are unseen.
+VISION_RANGE = 420.0
+# Half-angle of the forward vision cone (radians). ~60° each side = 120° cone.
+VISION_HALF_ANGLE = _math.radians(60.0)
 
 # ---------------------------------------------------------------------------
 # Smell / chemical field

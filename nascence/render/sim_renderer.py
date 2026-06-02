@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pygame
+import pymunk
 
 from ..sim.world import World
 from .camera import Camera
@@ -115,14 +116,23 @@ def _draw_creature(surface, creature, camera: Camera) -> None:
             if len(pts) >= 3:
                 pygame.draw.polygon(surface, leg_col, pts)
 
-    # Body hub.
+    # Body hub: an elongated box when stretched, otherwise a disc.
     cx, cy = creature.position
     sx, sy = camera.world_to_screen(cx, cy)
-    r = max(4, int(creature.morph.body_radius * camera.zoom))
-    pygame.draw.circle(surface, body_col, (sx, sy), r)
-    pygame.draw.circle(surface, edge_col, (sx, sy), r, width=2)
+    hub = creature.body.hub
+    hub_shape = creature.body.hub_shape
+    if isinstance(hub_shape, pymunk.Poly):
+        pts = [camera.world_to_screen(*hub.local_to_world(v))
+               for v in hub_shape.get_vertices()]
+        if len(pts) >= 3:
+            pygame.draw.polygon(surface, body_col, pts)
+            pygame.draw.polygon(surface, edge_col, pts, width=2)
+    else:
+        r = max(4, int(creature.morph.body_radius * camera.zoom))
+        pygame.draw.circle(surface, body_col, (sx, sy), r)
+        pygame.draw.circle(surface, edge_col, (sx, sy), r, width=2)
 
-    hx = cx + math.cos(creature.angle) * creature.morph.body_radius
-    hy = cy + math.sin(creature.angle) * creature.morph.body_radius
+    hx = cx + math.cos(creature.angle) * creature.morph.body_half_length
+    hy = cy + math.sin(creature.angle) * creature.morph.body_half_length
     pygame.draw.line(surface, edge_col, (sx, sy),
                      camera.world_to_screen(hx, hy), 2)

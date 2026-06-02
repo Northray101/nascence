@@ -17,6 +17,11 @@ from .creature import Creature
 from .food import Food
 from .morphology import CreatureMorphology
 
+# Every creature's shapes share this non-zero filter group, so creatures never
+# collide with each other (or themselves) — they pass straight through. Static
+# walls (group 0) still stop them.
+CREATURE_GROUP = 1
+
 
 class World:
     def __init__(
@@ -35,8 +40,10 @@ class World:
         self.creatures: list[Creature] = []
         self.food: list[Food] = []
         self.catches: list[tuple[Creature, Creature]] = []
-        # User-placed walls, kept as endpoint pairs for rendering.
+        # User-placed / obstacle walls, kept as endpoint pairs for rendering,
+        # with their Pymunk segments tracked so they can be cleared/rebuilt.
         self.user_walls: list[tuple[float, float, float, float]] = []
+        self._wall_shapes: list[pymunk.Segment] = []
         self.chem = ChemicalField(width, height)
 
         self._add_walls()
@@ -67,6 +74,10 @@ class World:
         creature = Creature(morph, position, angle, role=role)
         self.space.add(*creature.body.all_bodies())
         self.space.add(*creature.body.all_shapes())
+        # Creatures don't physically interact with one another — only with
+        # walls — so put all their shapes in one shared filter group.
+        for s in creature.body.all_shapes():
+            s.filter = pymunk.ShapeFilter(group=CREATURE_GROUP)
         self.space.add(*creature.body.constraints)
         self.creatures.append(creature)
         return creature
@@ -96,7 +107,16 @@ class World:
         seg.friction = 0.5
         seg.collision_type = CT_WALL
         self.space.add(seg)
+        self._wall_shapes.append(seg)
         self.user_walls.append((x1, y1, x2, y2))
+
+    def clear_walls(self) -> None:
+        """Remove every added obstacle/user wall (the boundary stays)."""
+        for seg in self._wall_shapes:
+            if seg in self.space.shapes:
+                self.space.remove(seg)
+        self._wall_shapes.clear()
+        self.user_walls.clear()
 
     def clear_food(self) -> None:
         self.food.clear()

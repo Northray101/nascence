@@ -20,7 +20,9 @@ from dataclasses import dataclass
 
 @dataclass
 class Command:
-    kind: str          # "food" | "clear_food" | "drag" | "wall" | "reset_pose"
+    # "food" | "clear_food" | "drag" | "wall" | "reset_pose"
+    #   | "advance_level" | "auto_advance" (x = 1 on / 0 off)
+    kind: str
     x: float = 0.0
     y: float = 0.0
     x2: float = 0.0

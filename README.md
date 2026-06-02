@@ -11,13 +11,20 @@ This is an early rough-draft build with all the major pieces sketched in.
 
 1. **Create a species** and name it, choosing its **role** (forager that eats
    food, or predator that hunts prey), **body** (firm or squishy *jelly*),
-   number of **legs**, and **leg joints** (simple, or hip + knee).
+   number of **legs**, and **leg joints** (simple, or hip + knee). More legs
+   make a **longer, more elongated body** (centipede-like).
 2. **Train its brain in a live sandbox** — a whole **population** of variations
-   lives in the world at once. They all try; each generation the **best
-   survive** and the rest are **culled and replaced by mutated copies of the
-   winners**, so the species visibly gets better. Meanwhile you can *interfere*:
-   drop/clear food, drag the current leader around, draw walls, and give it a
-   **Treat (+)** or **Scold (–)** to nudge it right now. A **speed slider** and
+   lives in the world at once. They all start from the **same spot each
+   generation** and **don't bump into each other**; what changes is the
+   **random environment**, which gets **harder every level** (goals farther
+   away, more obstacles). Each generation the **best survive** and the rest are
+   **culled and replaced by mutated copies of the winners**. Creatures sense
+   their goal through an **invisible cone of vision** with limited range (plus
+   smell), so they must *face* and get close to what they're after. Use
+   **Advance level** to crank up difficulty yourself, or leave **Auto** on to
+   let it level up once the species masters a level. Meanwhile you can
+   *interfere*: drop/clear food, drag the current leader, draw walls, and give a
+   **Treat (+)** / **Scold (–)**. A **speed slider** (up to 5,000×) and
    **pause** let you watch closely or fast-forward. (This is *neuroevolution* —
    fast to start and easy to watch, with no slow warm-up.)
 3. **Save** the best brain automatically when you press *Save best & stop*.
